@@ -18,7 +18,7 @@ public static class Terminal_InitTerminal_Patch
             return;
         _registered = true;
 
-        _ = new Terminal.ConsoleCommand("hearthbelow", "hearthbelow [carve|fill|flatten|smooth|restore|remesh|info] - voxel cave digging commands", args =>
+        _ = new Terminal.ConsoleCommand("hearthbelow", "hearthbelow [carve|fill|raise|flatten|smooth|restore|remesh|info] - voxel cave digging commands", args =>
         {
             Terminal ctx = args.Context;
             Player player = Player.m_localPlayer;
@@ -41,6 +41,7 @@ public static class Terminal_InitTerminal_Patch
             {
                 case "carve":
                 case "fill":
+                case "raise":
                 case "flatten":
                 case "smooth":
                 {
@@ -59,6 +60,8 @@ public static class Terminal_InitTerminal_Patch
                         bool ok = sub switch
                         {
                             "fill" => VoxelWorld.FillAt(hit.point, radius),
+                            // same delta/power ballpark as the hoe's raise piece
+                            "raise" => VoxelWorld.RaiseAt(hit.point, radius, 1f, 3f),
                             "flatten" => VoxelWorld.FlattenAt(hit.point, radius),
                             "smooth" => VoxelWorld.SmoothAt(hit.point, radius),
                             // no dig direction: the console command always blasts the full
@@ -106,7 +109,7 @@ public static class Terminal_InitTerminal_Patch
                     break;
                 }
             }
-        }, optionsFetcher: () => ["carve", "fill", "flatten", "smooth", "restore", "remesh", "info"]);
+        }, optionsFetcher: () => ["carve", "fill", "raise", "flatten", "smooth", "restore", "remesh", "info"]);
     }
     
     private static bool IsLocalPlayerAdmin()

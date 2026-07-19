@@ -32,8 +32,9 @@ world-saving and multiplayer systems.
   collision over seamlessly. Untouched zones are unaffected, and vanilla terrain tools keep
   working on voxelized zones.
 - **Live underground.** The voxel surface behaves like normal terrain: building, ground support,
-  grass, biome detection, footsteps, and fires all work. The hoe works underground too - raise
-  ground fills material back in, level/smooth shape the cave floor, paths/paving paint it. Deep
+  grass, biome detection, footsteps, and fires all work. The hoe works underground too and feels
+  like the surface hoe: raise ground grows the floor in the same small vanilla-sized steps,
+  level/smooth shape the cave floor (without eating low ceilings), paths/paving paint it. Deep
   enough down, a dungeon-style ambience fades in (configurable per player, or off). Log out in a
   cave and you log back in there; tombstones, drops, and loot stay down instead of popping
   topside.

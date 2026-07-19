@@ -271,6 +271,7 @@ public class VoxelZone
         int minGX = int.MaxValue, maxGX = int.MinValue, minGZ = int.MaxValue, maxGZ = int.MinValue;
         float gridTop = Origin.y + (NY - 1) * VerticalSpacing;
         float gridBottomSafe = Origin.y + 3f;
+        float maxChangedH = float.MinValue;
         for (int gz = 0; gz < NZ; ++gz)
         {
             for (int gx = 0; gx < NX; ++gx)
@@ -282,6 +283,7 @@ public class VoxelZone
                 if (h + GridHeadroom > gridTop || h < gridBottomSafe)
                     return false;
                 _heights[i] = h;
+                if (h > maxChangedH) maxChangedH = h;
                 if (gx < minGX) minGX = gx;
                 if (gx > maxGX) maxGX = gx;
                 if (gz < minGZ) minGZ = gz;
@@ -307,11 +309,14 @@ public class VoxelZone
         foreach (CarveOp op in Ops)
             ApplyOpDensity(op, minGX, maxGX, minGZ, maxGZ, false, out _, out _, out _, out _, out _, out _);
 
-        UpdateColumnRanges(
-            Mathf.Max(0, (minGX - 2) / ChunkSize), Mathf.Min(_chunksX - 1, (maxGX + 2) / ChunkSize),
-            Mathf.Max(0, (minGZ - 2) / ChunkSize), Mathf.Min(_chunksZ - 1, (maxGZ + 2) / ChunkSize));
+        UpdateColumnRanges(Mathf.Max(0, (minGX - 2) / ChunkSize), Mathf.Min(_chunksX - 1, (maxGX + 2) / ChunkSize), Mathf.Max(0, (minGZ - 2) / ChunkSize), Mathf.Min(_chunksZ - 1, (maxGZ + 2) / ChunkSize));
         MarkSampleRange(_dirty, minGX, 0, minGZ, maxGX, NY - 1, maxGZ);
         RemeshDirty();
+        // vanilla raise lets the player ride the heightmap collider up; here the voxel mesh
+        // just rebuilds around them, so pop out anyone the new surface swallowed
+        Vector3 center = new(Origin.x + (minGX + maxGX) * 0.5f * HorizontalSpacing, maxChangedH, Origin.z + (minGZ + maxGZ) * 0.5f * HorizontalSpacing);
+        float ex = (maxGX - minGX) * HorizontalSpacing, ez = (maxGZ - minGZ) * HorizontalSpacing;
+        VoxelWorld.EjectBuried(center, 0.5f * Mathf.Sqrt(ex * ex + ez * ez) + 1f);
         return true;
     }
 
@@ -348,8 +353,10 @@ public class VoxelZone
     {
         float r = op.Radius;
         float extentXZ = r;
-        bool planeOp = op.Type == (byte)VoxelOpType.Flatten || op.Type == (byte)VoxelOpType.Smooth;
+        bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth;
         float extentY = planeOp ? PlaneOpBand : r;
+        if (op.Type == (byte)VoxelOpType.Raise)
+            extentY = Mathf.Max(extentY, op.Depth + 1.5f); // modded pieces can raise more per swing than the band
         Vector3 scoopDir = Vector3.down, scoopU = Vector3.right, scoopV = Vector3.forward;
         if (op.Type == (byte)VoxelOpType.Scoop)
         {
@@ -376,10 +383,10 @@ public class VoxelZone
         }
 
         int smoothW = maxX - minX + 1;
-        if (op.Type == (byte)VoxelOpType.Smooth)
-            PrepareSmoothColumns(op, minX, maxX, minZ, maxZ, minY, maxY);
+        if (planeOp)
+            PrepareFloorColumns(op, minX, maxX, minZ, maxZ, minY, maxY);
 
-        bool isCarve = op.Type == (byte)VoxelOpType.Carve || op.Type == (byte)VoxelOpType.Scoop;
+        bool isCarve = op.Type is (byte)VoxelOpType.Carve or (byte)VoxelOpType.Scoop;
         bool flipped = false;
         bool anyWrite = false;
         for (int gy = minY; gy <= maxY; ++gy)
@@ -413,21 +420,32 @@ public class VoxelZone
                         }
                         case VoxelOpType.Flatten:
                         {
-                            float dx = x - op.Point.x, dz = z - op.Point.z;
-                            if (dx * dx + dz * dz <= r * r)
+                            int ti = (gz - minZ) * smoothW + (gx - minX);
+                            if (float.IsNaN(_smoothTargets[ti]))
+                                break; // outside the radius
+                            float t = op.Point.y - y; // positive below the target plane
+                            if (y <= op.Point.y)
                             {
-                                float t = op.Point.y - y;
-                                if (y <= op.Point.y)
-                                {
-                                    float v = Mathf.Min(t, FillDensityCap);
-                                    if (v > d) newD = v;
-                                }
-                                else if (t < d)
-                                {
-                                    newD = t;
-                                }
+                                float v = Mathf.Min(t, FillDensityCap);
+                                if (v > d) newD = v;
+                            }
+                            else if (y <= _smoothFloors[ti] + 1f && t < d)
+                            {
+                                // only cut between the plane and the old floor (NaN floor
+                                // compares false) - leveling must not eat low ceilings
+                                newD = t;
                             }
 
+                            break;
+                        }
+                        case VoxelOpType.Raise:
+                        {
+                            // vanilla-style raise: targets computed per column, fill only
+                            float target = _smoothTargets[(gz - minZ) * smoothW + (gx - minX)];
+                            if (float.IsNaN(target) || y > target)
+                                break;
+                            float v = Mathf.Min(target - y, FillDensityCap);
+                            if (v > d) newD = v;
                             break;
                         }
                         case VoxelOpType.Scoop:
@@ -508,7 +526,7 @@ public class VoxelZone
 
     // Per column: floor crossing nearest the op plane, blended toward it with smoothstep
     // falloff. NaN = outside radius or no floor - keeps smooth the hell off tunnel walls.
-    private void PrepareSmoothColumns(CarveOp op, int minX, int maxX, int minZ, int maxZ, int minY, int maxY)
+    private void PrepareFloorColumns(CarveOp op, int minX, int maxX, int minZ, int maxZ, int minY, int maxY)
     {
         int w = maxX - minX + 1;
         int needed = w * (maxZ - minZ + 1);
@@ -531,6 +549,7 @@ public class VoxelZone
                 if (n > 1f)
                 {
                     _smoothTargets[col] = float.NaN;
+                    _smoothFloors[col] = float.NaN;
                     continue;
                 }
 
@@ -546,14 +565,31 @@ public class VoxelZone
                     floor = cross;
                 }
 
-                if (float.IsNaN(floor))
-                {
-                    _smoothTargets[col] = float.NaN;
-                    continue;
-                }
-
                 _smoothFloors[col] = floor;
-                _smoothTargets[col] = Mathf.Lerp(floor, op.Point.y, Mathf.SmoothStep(1f, 0f, n));
+                switch ((VoxelOpType)op.Type)
+                {
+                    case VoxelOpType.Flatten:
+                        _smoothTargets[col] = op.Point.y;
+                        break;
+                    case VoxelOpType.Raise:
+                    {
+                        if (float.IsNaN(floor))
+                        {
+                            _smoothTargets[col] = float.NaN;
+                            break;
+                        }
+
+                        float step = op.Depth * (op.Power > 0f ? Mathf.Pow(1f - n, op.Power) : 1f);
+                        float target = op.Point.y + step;
+                        // vanilla RaiseTerrain: skip columns already above the aim target,
+                        // otherwise rise at most one step per swing
+                        _smoothTargets[col] = target < floor ? float.NaN : Mathf.Min(target, floor + step);
+                        break;
+                    }
+                    default:
+                        _smoothTargets[col] = float.IsNaN(floor) ? float.NaN : Mathf.Lerp(floor, op.Point.y, Mathf.SmoothStep(1f, 0f, n));
+                        break;
+                }
             }
         }
     }

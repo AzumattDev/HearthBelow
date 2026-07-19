@@ -9,7 +9,8 @@ public enum VoxelOpType : byte
     Fill = 1, // hoe raise underground
     Flatten = 2, // hoe level: fill below the op height, carve headroom above
     Scoop = 3, // gradual dig: shallow bite, Radius wide, Depth deep along Dir
-    Smooth = 4 // hoe smooth: blend the floor toward the op plane
+    Smooth = 4, // hoe smooth: blend the floor toward the op plane
+    Raise = 5 // hoe raise underground: per-column vanilla RaiseTerrain math (Depth = raiseDelta, Power = raisePower)
 }
 
 public enum VoxelOpShape : byte
@@ -28,7 +29,8 @@ public struct CarveOp
     public Vector3 Point;
     public float Radius;
     public Vector3 Dir; // scoop only: approach direction of the dig
-    public float Depth; // scoop only: bite depth along Dir
+    public float Depth; // scoop: bite depth along Dir; raise: per-swing height delta (vanilla m_raiseDelta)
+    public float Power; // raise only: falloff exponent (vanilla m_raisePower)
     public float FloorY; // carve/scoop: protected floor (world y) from tool depth caps; -Infinity = uncapped
 
     public void Write(ZPackage pkg)
@@ -39,9 +41,16 @@ public struct CarveOp
         pkg.Write(Point);
         pkg.Write(Radius);
         pkg.Write(FloorY);
-        if (Type != (byte)VoxelOpType.Scoop) return;
-        pkg.Write(Dir);
-        pkg.Write(Depth);
+        if (Type == (byte)VoxelOpType.Scoop)
+        {
+            pkg.Write(Dir);
+            pkg.Write(Depth);
+        }
+        else if (Type == (byte)VoxelOpType.Raise)
+        {
+            pkg.Write(Depth);
+            pkg.Write(Power);
+        }
     }
 
     public static CarveOp Read(ZPackage pkg)
@@ -55,9 +64,16 @@ public struct CarveOp
             Radius = pkg.ReadSingle(),
             FloorY = pkg.ReadSingle()
         };
-        if (op.Type != (byte)VoxelOpType.Scoop) return op;
-        op.Dir = pkg.ReadVector3();
-        op.Depth = pkg.ReadSingle();
+        if (op.Type == (byte)VoxelOpType.Scoop)
+        {
+            op.Dir = pkg.ReadVector3();
+            op.Depth = pkg.ReadSingle();
+        }
+        else if (op.Type == (byte)VoxelOpType.Raise)
+        {
+            op.Depth = pkg.ReadSingle();
+            op.Power = pkg.ReadSingle();
+        }
 
         return op;
     }
@@ -120,11 +136,34 @@ public struct CarveOp
 
         return op;
     }
+    
+    private static CarveOp ReadV5(ZPackage pkg)
+    {
+        // v5 predates the Raise type, so scoop is the only op with extra fields
+        CarveOp op = new()
+        {
+            Id = pkg.ReadInt(),
+            Type = pkg.ReadByte(),
+            Shape = pkg.ReadByte(),
+            Point = pkg.ReadVector3(),
+            Radius = pkg.ReadSingle(),
+            FloorY = pkg.ReadSingle()
+        };
+        if (op.Type == (byte)VoxelOpType.Scoop)
+        {
+            op.Dir = pkg.ReadVector3();
+            op.Depth = pkg.ReadSingle();
+        }
+
+        return op;
+    }
 
     public static CarveOp Read(ZPackage pkg, int version)
     {
-        if (version >= 5)
+        if (version >= 6)
             return Read(pkg);
+        if (version == 5)
+            return ReadV5(pkg);
         if (version == 4)
             return ReadV4(pkg);
         if (version == 3)
@@ -136,7 +175,7 @@ public struct CarveOp
 // Per-zone op list compressed onto the TerrainComp ZDO - save persistence and client sync for free.
 public static class CarveData
 {
-    public const int Version = 5;
+    public const int Version = 6;
     public static readonly int ZdoKey = "HearthBelow_VoxelOps".GetStableHashCode();
 
     public static byte[] Serialize(List<CarveOp> ops)

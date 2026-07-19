@@ -253,6 +253,22 @@ public static class VoxelWorld
         }, null);
     }
 
+    public static bool RaiseAt(Vector3 point, float radius, float delta, float power)
+    {
+        if (delta <= 0f)
+            return FlattenAt(point, radius); // vanilla treats delta 0 as "set to aim height"
+        return ApplyPlayerOp(new CarveOp
+        {
+            Id = NewOpId(),
+            Type = (byte)VoxelOpType.Raise,
+            Point = point,
+            Radius = Mathf.Clamp(radius, 0.5f, 6f),
+            Depth = Mathf.Clamp(delta, 0.1f, 8f),
+            Power = Mathf.Clamp(power, 0f, 8f),
+            FloorY = float.NegativeInfinity
+        }, null);
+    }
+
     public static bool FlattenAt(Vector3 point, float radius)
     {
         return ApplyPlayerOp(new CarveOp
@@ -283,8 +299,15 @@ public static class VoxelWorld
     {
         return (byte)(HearthBelowPlugin.CarveShape.Value == HearthBelowPlugin.DigShape.Cube ? VoxelOpShape.Cube : VoxelOpShape.Sphere);
     }
-
+    
     public static bool IsUndergroundAt(Vector3 pos)
+    {
+        if (GetActiveZoneAt(pos) == null)
+            return false;
+        return Heightmap.GetHeight(pos, out float height) && pos.y < height - 1f;
+    }
+
+    public static bool IsCarvedGroundAt(Vector3 pos)
     {
         if (GetActiveZoneAt(pos) == null)
             return false;
@@ -371,18 +394,22 @@ public static class VoxelWorld
     {
         if (op.Type == (byte)VoxelOpType.Carve || op.Type == (byte)VoxelOpType.Scoop)
             return; // removing material never buries anyone
-        float range = op.Radius + 1f;
+        EjectBuried(op.Point, op.Radius + 1f);
+    }
+
+    internal static void EjectBuried(Vector3 point, float range)
+    {
         foreach (Character ch in Character.GetAllCharacters())
         {
             if (ch == null || ch.m_nview == null || !ch.m_nview.IsValid() || !ch.m_nview.IsOwner())
                 continue;
             Vector3 pos = ch.transform.position;
-            if (Utils.DistanceXZ(pos, op.Point) > range)
+            if (Utils.DistanceXZ(pos, point) > range)
                 continue;
             VoxelZone? zone = GetActiveZoneAt(pos);
             if (zone == null || !zone.SampleSolid(pos + Vector3.up * 0.3f))
                 continue;
-            float top = Mathf.Max(pos.y, op.Point.y) + range + 2f;
+            float top = Mathf.Max(pos.y, point.y) + range + 2f;
             float y = pos.y;
             while (y < top && zone.SampleSolid(new Vector3(pos.x, y + 0.3f, pos.z)))
                 y += 0.25f;
@@ -427,7 +454,13 @@ public static class VoxelWorld
         if (nview == null || !nview.IsValid() || !nview.IsOwner())
             return;
         CarveOp op = CarveOp.Read(pkg);
-        op.Radius = Mathf.Clamp(op.Radius, MinDigRadius, op.Type == (byte)VoxelOpType.Flatten || op.Type == (byte)VoxelOpType.Smooth ? MaxPlaneRadius : MaxDigRadius);
+        bool wide = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
+        op.Radius = Mathf.Clamp(op.Radius, MinDigRadius, wide ? MaxPlaneRadius : MaxDigRadius);
+        if (op.Type == (byte)VoxelOpType.Raise)
+        {
+            op.Depth = Mathf.Clamp(op.Depth, 0.1f, 8f);
+            op.Power = Mathf.Clamp(op.Power, 0f, 8f);
+        }
         if (!AppendAndSave(comp, op))
             return;
         if (comp.m_hmap != null)

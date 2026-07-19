@@ -147,6 +147,7 @@
     <ItemGroup>
         <Content Include=".gitignore"/>
         <Content Include="environment.props"/>
+        <Content Include="FAQ.md" />
         <Content Include="ILRepack.targets"/>
         <Content Include="Libs\ServerSync.dll">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

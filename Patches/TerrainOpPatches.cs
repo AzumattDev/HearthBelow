@@ -29,12 +29,12 @@ public static class TerrainOp_Awake_Patch
             return;
         }
 
-        if (!VoxelWorld.IsUndergroundAt(pos))
+        if (!VoxelWorld.IsCarvedGroundAt(pos))
             return;
         TerrainOp.Settings settings = __instance.m_settings;
         if (settings.m_raise)
         {
-            VoxelWorld.FillAt(pos + Vector3.up * (settings.m_raiseRadius * 0.5f), Mathf.Max(1.25f, settings.m_raiseRadius * 0.75f));
+            VoxelWorld.RaiseAt(pos, settings.m_raiseRadius, settings.m_raiseDelta, settings.m_raisePower);
         }
         else if (settings.m_level)
         {
@@ -54,7 +54,7 @@ public static class TerrainComp_InternalDoOperation_Patch
 {
     private static void Prefix(Vector3 pos, TerrainOp.Settings modifier)
     {
-        if (!VoxelWorld.IsUndergroundAt(pos))
+        if (!VoxelWorld.IsCarvedGroundAt(pos))
             return;
         modifier.m_level = false;
         modifier.m_raise = false;

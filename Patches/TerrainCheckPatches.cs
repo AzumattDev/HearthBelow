@@ -58,7 +58,7 @@ public static class Game_FindSpawnPoint_Patch
 {
     // bail-out so a broken zone can't hold the loading screen hostage forever
     private const float MeshWaitTimeout = 30f;
-    
+
     private static Vector3? _protectSpawn;
     private static float _gateStart = -1f;
 

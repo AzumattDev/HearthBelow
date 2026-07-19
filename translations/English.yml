@@ -1,0 +1,4 @@
+# Ready to use english translation file for the plugin
+# (for more information on LocalizationManager, see the LocalizationManager documentation https://github.com/blaxxun-boop/LocalizationManager#example-project).
+hearthbelow_pickaxe_depth_limit: "This pickaxe can't dig any deeper"
+hearthbelow_ground_too_hard: "The ground here is too hard to dig"

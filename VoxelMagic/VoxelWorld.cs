@@ -10,6 +10,8 @@ public static class VoxelWorld
     // clamps for player-driven ops - digs stay tight, flatten/smooth reach wider
     private const float MinDigRadius = 0.25f, MaxDigRadius = 4f;
     private const float MinPlaneRadius = 0.5f, MaxPlaneRadius = 6f;
+    private const float MinRaiseDelta = 0.1f, MaxRaiseDelta = 8f;
+    private const float MaxRaisePower = 8f;
 
     // gap under the heightmap that counts as carved ground; clears the mesher's worst-case
     // drift on uncarved slopes (~10cm + 5cm border sink)
@@ -262,9 +264,9 @@ public static class VoxelWorld
             Id = NewOpId(),
             Type = (byte)VoxelOpType.Raise,
             Point = point,
-            Radius = Mathf.Clamp(radius, 0.5f, 6f),
-            Depth = Mathf.Clamp(delta, 0.1f, 8f),
-            Power = Mathf.Clamp(power, 0f, 8f),
+            Radius = Mathf.Clamp(radius, MinPlaneRadius, MaxPlaneRadius),
+            Depth = Mathf.Clamp(delta, MinRaiseDelta, MaxRaiseDelta),
+            Power = Mathf.Clamp(power, 0f, MaxRaisePower),
             FloorY = float.NegativeInfinity
         }, null);
     }
@@ -454,12 +456,12 @@ public static class VoxelWorld
         if (nview == null || !nview.IsValid() || !nview.IsOwner())
             return;
         CarveOp op = CarveOp.Read(pkg);
-        bool wide = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
-        op.Radius = Mathf.Clamp(op.Radius, MinDigRadius, wide ? MaxPlaneRadius : MaxDigRadius);
+        bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
+        op.Radius = Mathf.Clamp(op.Radius, MinDigRadius, planeOp ? MaxPlaneRadius : MaxDigRadius);
         if (op.Type == (byte)VoxelOpType.Raise)
         {
-            op.Depth = Mathf.Clamp(op.Depth, 0.1f, 8f);
-            op.Power = Mathf.Clamp(op.Power, 0f, 8f);
+            op.Depth = Mathf.Clamp(op.Depth, MinRaiseDelta, MaxRaiseDelta);
+            op.Power = Mathf.Clamp(op.Power, 0f, MaxRaisePower);
         }
         if (!AppendAndSave(comp, op))
             return;

@@ -56,7 +56,7 @@ public static class DistantLod
         {
             Heightmap zh = pair.Key;
             VoxelZone zone = pair.Value;
-            if (zh == null || zone == null || !zone.IsActive)
+            if (zh == null || zone is not { IsActive: true })
                 continue;
             Vector3 c = zh.transform.position;
             float half = zh.m_width * zh.m_scale * 0.5f;

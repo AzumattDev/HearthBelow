@@ -53,122 +53,31 @@ public struct CarveOp
         }
     }
 
-    public static CarveOp Read(ZPackage pkg)
+    public static CarveOp Read(ZPackage pkg) => Read(pkg, CarveData.Version);
+
+    public static CarveOp Read(ZPackage pkg, int version)
     {
         CarveOp op = new()
         {
             Id = pkg.ReadInt(),
-            Type = pkg.ReadByte(),
-            Shape = pkg.ReadByte(),
+            Type = version >= 2 ? pkg.ReadByte() : (byte)VoxelOpType.Carve,
+            Shape = version >= 3 ? pkg.ReadByte() : (byte)VoxelOpShape.Sphere,
             Point = pkg.ReadVector3(),
             Radius = pkg.ReadSingle(),
-            FloorY = pkg.ReadSingle()
+            FloorY = version >= 5 ? pkg.ReadSingle() : float.NegativeInfinity
         };
-        if (op.Type == (byte)VoxelOpType.Scoop)
+        if (op.Type == (byte)VoxelOpType.Scoop && version >= 4)
         {
             op.Dir = pkg.ReadVector3();
             op.Depth = pkg.ReadSingle();
         }
-        else if (op.Type == (byte)VoxelOpType.Raise)
+        else if (op.Type == (byte)VoxelOpType.Raise && version >= 6)
         {
             op.Depth = pkg.ReadSingle();
             op.Power = pkg.ReadSingle();
         }
 
         return op;
-    }
-
-    private static CarveOp ReadV1(ZPackage pkg)
-    {
-        return new CarveOp
-        {
-            Id = pkg.ReadInt(),
-            Type = (byte)VoxelOpType.Carve,
-            Shape = (byte)VoxelOpShape.Sphere,
-            Point = pkg.ReadVector3(),
-            Radius = pkg.ReadSingle(),
-            FloorY = float.NegativeInfinity
-        };
-    }
-
-    private static CarveOp ReadV2(ZPackage pkg)
-    {
-        return new CarveOp
-        {
-            Id = pkg.ReadInt(),
-            Type = pkg.ReadByte(),
-            Shape = (byte)VoxelOpShape.Sphere,
-            Point = pkg.ReadVector3(),
-            Radius = pkg.ReadSingle(),
-            FloorY = float.NegativeInfinity
-        };
-    }
-
-    private static CarveOp ReadV3(ZPackage pkg)
-    {
-        // v3 predates the Scoop type, so no op carries Dir/Depth
-        return new CarveOp
-        {
-            Id = pkg.ReadInt(),
-            Type = pkg.ReadByte(),
-            Shape = pkg.ReadByte(),
-            Point = pkg.ReadVector3(),
-            Radius = pkg.ReadSingle(),
-            FloorY = float.NegativeInfinity
-        };
-    }
-
-    private static CarveOp ReadV4(ZPackage pkg)
-    {
-        // v4 predates tool depth caps, so no op carries a protected floor
-        CarveOp op = new()
-        {
-            Id = pkg.ReadInt(),
-            Type = pkg.ReadByte(),
-            Shape = pkg.ReadByte(),
-            Point = pkg.ReadVector3(),
-            Radius = pkg.ReadSingle(),
-            FloorY = float.NegativeInfinity
-        };
-        if (op.Type != (byte)VoxelOpType.Scoop) return op;
-        op.Dir = pkg.ReadVector3();
-        op.Depth = pkg.ReadSingle();
-
-        return op;
-    }
-    
-    private static CarveOp ReadV5(ZPackage pkg)
-    {
-        // v5 predates the Raise type, so scoop is the only op with extra fields
-        CarveOp op = new()
-        {
-            Id = pkg.ReadInt(),
-            Type = pkg.ReadByte(),
-            Shape = pkg.ReadByte(),
-            Point = pkg.ReadVector3(),
-            Radius = pkg.ReadSingle(),
-            FloorY = pkg.ReadSingle()
-        };
-        if (op.Type == (byte)VoxelOpType.Scoop)
-        {
-            op.Dir = pkg.ReadVector3();
-            op.Depth = pkg.ReadSingle();
-        }
-
-        return op;
-    }
-
-    public static CarveOp Read(ZPackage pkg, int version)
-    {
-        if (version >= 6)
-            return Read(pkg);
-        if (version == 5)
-            return ReadV5(pkg);
-        if (version == 4)
-            return ReadV4(pkg);
-        if (version == 3)
-            return ReadV3(pkg);
-        return version == 2 ? ReadV2(pkg) : ReadV1(pkg);
     }
 }
 

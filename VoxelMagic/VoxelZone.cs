@@ -420,8 +420,8 @@ public class VoxelZone
                         }
                         case VoxelOpType.Flatten:
                         {
-                            int ti = (gz - minZ) * smoothW + (gx - minX);
-                            if (float.IsNaN(_smoothTargets[ti]))
+                            int col = (gz - minZ) * smoothW + (gx - minX);
+                            if (float.IsNaN(_smoothTargets[col]))
                                 break; // outside the radius
                             float t = op.Point.y - y; // positive below the target plane
                             if (y <= op.Point.y)
@@ -429,7 +429,7 @@ public class VoxelZone
                                 float v = Mathf.Min(t, FillDensityCap);
                                 if (v > d) newD = v;
                             }
-                            else if (y <= _smoothFloors[ti] + 1f && t < d)
+                            else if (y <= _smoothFloors[col] + 1f && t < d)
                             {
                                 // only cut between the plane and the old floor (NaN floor
                                 // compares false) - leveling must not eat low ceilings
@@ -468,9 +468,9 @@ public class VoxelZone
                             }
                             else
                             {
-                                float pt = t / op.Depth;
-                                float pr = perp.magnitude / r;
-                                float k = Mathf.Sqrt(pt * pt + pr * pr);
+                                float along = t / op.Depth;
+                                float across = perp.magnitude / r;
+                                float k = Mathf.Sqrt(along * along + across * across);
                                 sd = k > 1e-4f ? (k - 1f) * rel.magnitude / k : -Mathf.Min(op.Depth, r);
                             }
 

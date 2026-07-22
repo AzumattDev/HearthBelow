@@ -255,14 +255,15 @@ public static class VoxelWorld
         }, null);
     }
 
-    public static bool RaiseAt(Vector3 point, float radius, float delta, float power)
+    public static bool RaiseAt(Vector3 point, float radius, float delta, float power, bool square = false)
     {
         if (delta <= 0f)
-            return FlattenAt(point, radius); // vanilla treats delta 0 as "set to aim height"
+            return FlattenAt(point, radius, square); // vanilla treats delta 0 as "set to aim height"
         return ApplyPlayerOp(new CarveOp
         {
             Id = NewOpId(),
             Type = (byte)VoxelOpType.Raise,
+            Shape = (byte)(square ? VoxelOpShape.Cube : VoxelOpShape.Sphere),
             Point = point,
             Radius = Mathf.Clamp(radius, MinPlaneRadius, MaxPlaneRadius),
             Depth = Mathf.Clamp(delta, MinRaiseDelta, MaxRaiseDelta),
@@ -271,12 +272,13 @@ public static class VoxelWorld
         }, null);
     }
 
-    public static bool FlattenAt(Vector3 point, float radius)
+    public static bool FlattenAt(Vector3 point, float radius, bool square = false)
     {
         return ApplyPlayerOp(new CarveOp
         {
             Id = NewOpId(),
             Type = (byte)VoxelOpType.Flatten,
+            Shape = (byte)(square ? VoxelOpShape.Cube : VoxelOpShape.Sphere),
             Point = point,
             Radius = Mathf.Clamp(radius, MinPlaneRadius, MaxPlaneRadius),
             FloorY = float.NegativeInfinity
@@ -409,11 +411,11 @@ public static class VoxelWorld
             if (Utils.DistanceXZ(pos, point) > range)
                 continue;
             VoxelZone? zone = GetActiveZoneAt(pos);
-            if (zone == null || !zone.SampleSolid(pos + Vector3.up * 0.3f))
+            if (zone == null || !zone.SampleSolid(pos + Vector3.up * 0.2f))
                 continue;
             float top = Mathf.Max(pos.y, point.y) + range + 2f;
             float y = pos.y;
-            while (y < top && zone.SampleSolid(new Vector3(pos.x, y + 0.3f, pos.z)))
+            while (y < top && zone.SampleSolid(new Vector3(pos.x, y + 0.2f, pos.z)))
                 y += 0.25f;
             if (y >= top)
                 continue; // no air above, let the vanilla systems sort it out

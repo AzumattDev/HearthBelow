@@ -15,7 +15,7 @@ public class VoxelZone
     // fills cap out here so a later carve can still chew back through
     private const float FillDensityCap = 4f;
 
-    private const float GridHeadroom = 2f;
+    private const float GridHeadroom = 6f;
 
     // vertical span flatten/smooth bother to touch around the aim point
     private const float PlaneOpBand = 4.5f;
@@ -54,6 +54,11 @@ public class VoxelZone
     private float[] _colMinH = null!, _colMaxH = null!;
     private float[] _heights = null!;
     private int _heightsChecksum;
+    // baked straight from Hmap.m_renderMesh, so it carries vanilla's real paint (path/paved/
+    // cultivated) plus whatever any mod (e.g. TerrainHoe) bakes into that mesh's vertex colors -
+    // no need to reimplement or reflect into anyone else's paint logic
+    private Color32[]? _paintColors;
+    private readonly List<Color32> _paintColorsScratch = [];
     private bool _swapPending;
     private readonly Stopwatch _swapWatch = new();
     private long _meshTicks;
@@ -163,7 +168,26 @@ public class VoxelZone
         _colMinH = new float[_chunksX * _chunksZ];
         _colMaxH = new float[_chunksX * _chunksZ];
         UpdateColumnRanges(0, _chunksX - 1, 0, _chunksZ - 1);
+        RefreshPaintColors();
         return true;
+    }
+
+    // vanilla (and any mod hooking Heightmap.RebuildRenderMesh, e.g. TerrainHoe's custom paints)
+    // writes its final per-vertex color into Hmap.m_renderMesh - sample that directly instead of
+    // recomputing biome blending myself, so cave floors always match whatever the surface shows
+    private void RefreshPaintColors()
+    {
+        Mesh? renderMesh = Hmap.m_renderMesh;
+        int n = Hmap.m_width + 1;
+        if (renderMesh == null || renderMesh.vertexCount != n * n)
+        {
+            _paintColors = null;
+            return;
+        }
+
+        _paintColorsScratch.Clear();
+        renderMesh.GetColors(_paintColorsScratch);
+        _paintColors = _paintColorsScratch.Count == n * n ? _paintColorsScratch.ToArray() : null;
     }
 
     private float SampleWorldHeight(int gx, int gz, int n, Vector3 hp)
@@ -238,10 +262,18 @@ public class VoxelZone
         if (Hmap == null || Hmap.m_heights == null || Hmap.m_heights.Count == 0)
             return;
         // every ZDO write (my own carve saves included) pokes the heightmap and lands here,
-        // so only rebuild when the heights actually changed
+        // so only rebuild the geometry when the heights actually changed
         int checksum = ComputeHeightsChecksum();
         if (checksum == _heightsChecksum)
+        {
+            // heights are identical but Regenerate() still ran, so this was a paint-only change
+            // (vanilla path/paved/cultivated, or a mod's custom paint) - repaint without touching
+            // geometry
+            RefreshPaintColors();
+            if (!_swapPending && Root != null)
+                ForceRemeshAll();
             return;
+        }
 
         if (!_swapPending && Root != null && TryIncrementalHeightsUpdate())
         {
@@ -260,7 +292,11 @@ public class VoxelZone
             CarveDensity(op, false);
         MarkAllDirty();
         if (!_swapPending)
+        {
             RemeshNow();
+            // a raise that outgrew the grid lands here - pop out anyone the rebuilt surface swallowed
+            VoxelWorld.EjectBuried(Hmap.transform.position, _zoneSize);
+        }
     }
 
     // patch only the columns whose heights changed; false = outside the grid, full rebuild
@@ -353,7 +389,9 @@ public class VoxelZone
     {
         float r = op.Radius;
         float extentXZ = r;
-        bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth;
+        // plane ops need PrepareFloorColumns for their per-column targets - Raise included,
+        // or it reads the previous op's stale targets and silently no-ops
+        bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
         float extentY = planeOp ? PlaneOpBand : r;
         if (op.Type == (byte)VoxelOpType.Raise)
             extentY = Mathf.Max(extentY, op.Depth + 1.5f); // modded pieces can raise more per swing than the band
@@ -537,20 +575,40 @@ public class VoxelZone
         }
 
         float r = op.Radius;
+        bool square = op.Shape == (byte)VoxelOpShape.Cube;
+        int centerX = Mathf.FloorToInt((op.Point.x - Origin.x) / HorizontalSpacing + 0.5f);
+        int centerZ = Mathf.FloorToInt((op.Point.z - Origin.z) / HorizontalSpacing + 0.5f);
+        float f = r / HorizontalSpacing;
+        int reach = Mathf.CeilToInt(f);
         for (int gz = minZ; gz <= maxZ; ++gz)
         {
-            float z = Origin.z + gz * HorizontalSpacing;
             for (int gx = minX; gx <= maxX; ++gx)
             {
                 int col = (gz - minZ) * w + (gx - minX);
-                float x = Origin.x + gx * HorizontalSpacing;
-                float dx = x - op.Point.x, dz = z - op.Point.z;
-                float n = Mathf.Sqrt(dx * dx + dz * dz) / r;
-                if (n > 1f)
+                int di = gx - centerX, dj = gz - centerZ;
+                float n;
+                if (square)
                 {
-                    _smoothTargets[col] = float.NaN;
-                    _smoothFloors[col] = float.NaN;
-                    continue;
+                    if (Mathf.Abs(di) > reach || Mathf.Abs(dj) > reach)
+                    {
+                        _smoothTargets[col] = float.NaN;
+                        _smoothFloors[col] = float.NaN;
+                        continue;
+                    }
+
+                    n = 0f;
+                }
+                else
+                {
+                    float dist = Mathf.Sqrt(di * di + dj * dj);
+                    if (dist > f)
+                    {
+                        _smoothTargets[col] = float.NaN;
+                        _smoothFloors[col] = float.NaN;
+                        continue;
+                    }
+
+                    n = dist / f;
                 }
 
                 float floor = float.NaN, bestDist = float.MaxValue;
@@ -579,16 +637,23 @@ public class VoxelZone
                             break;
                         }
 
-                        float step = op.Depth * (op.Power > 0f ? Mathf.Pow(1f - n, op.Power) : 1f);
+                        float step = op.Depth * (square || op.Power <= 0f ? 1f : Mathf.Pow(1f - n, op.Power));
                         float target = op.Point.y + step;
-                        // vanilla RaiseTerrain: skip columns already above the aim target,
-                        // otherwise rise at most one step per swing
                         _smoothTargets[col] = target < floor ? float.NaN : Mathf.Min(target, floor + step);
                         break;
                     }
                     default:
-                        _smoothTargets[col] = float.IsNaN(floor) ? float.NaN : Mathf.Lerp(floor, op.Point.y, Mathf.SmoothStep(1f, 0f, n));
+                    {
+                        if (float.IsNaN(floor))
+                        {
+                            _smoothTargets[col] = float.NaN;
+                            break;
+                        }
+
+                        float target = Mathf.Lerp(floor, op.Point.y, 1f - n * n * n);
+                        _smoothTargets[col] = floor + Mathf.Clamp(target - floor, -1f, 1f);
                         break;
+                    }
                 }
             }
         }
@@ -751,10 +816,16 @@ public class VoxelZone
     public bool SampleSolid(Vector3 world)
     {
         Vector3 l = world - Origin;
-        int gx = Mathf.Clamp(Mathf.RoundToInt(l.x / HorizontalSpacing), 0, NX - 1);
-        int gy = Mathf.Clamp(Mathf.RoundToInt(l.y / VerticalSpacing), 0, NY - 1);
-        int gz = Mathf.Clamp(Mathf.RoundToInt(l.z / HorizontalSpacing), 0, NZ - 1);
-        return D(gx, gy, gz) > 0f;
+        float fx = Mathf.Clamp(l.x / HorizontalSpacing, 0f, NX - 1.0001f);
+        float fy = Mathf.Clamp(l.y / VerticalSpacing, 0f, NY - 1.0001f);
+        float fz = Mathf.Clamp(l.z / HorizontalSpacing, 0f, NZ - 1.0001f);
+        int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
+        float tx = fx - x0, ty = fy - y0, tz = fz - z0;
+        float d00 = Mathf.Lerp(D(x0, y0, z0), D(x0 + 1, y0, z0), tx);
+        float d10 = Mathf.Lerp(D(x0, y0 + 1, z0), D(x0 + 1, y0 + 1, z0), tx);
+        float d01 = Mathf.Lerp(D(x0, y0, z0 + 1), D(x0 + 1, y0, z0 + 1), tx);
+        float d11 = Mathf.Lerp(D(x0, y0 + 1, z0 + 1), D(x0 + 1, y0 + 1, z0 + 1), tx);
+        return Mathf.Lerp(Mathf.Lerp(d00, d10, ty), Mathf.Lerp(d01, d11, ty), tz) > 0f;
     }
 
     public void GetSurfaceAttributes(Vector3 world, out Vector2 uv, out Color32 color)
@@ -762,7 +833,26 @@ public class VoxelZone
         float u = Mathf.Clamp01((world.x - _zoneMinX) / _zoneSize);
         float v = Mathf.Clamp01((world.z - _zoneMinZ) / _zoneSize);
         uv = new Vector2(u, v);
-        color = (Color32)Hmap.GetBiomeColor(DUtils.SmoothStep(0f, 1f, u), DUtils.SmoothStep(0f, 1f, v));
+        color = SamplePaintColor(u, v);
+    }
+
+    private Color32 SamplePaintColor(float u, float v)
+    {
+        if (_paintColors == null)
+            return (Color32)Hmap.GetBiomeColor(DUtils.SmoothStep(0f, 1f, u), DUtils.SmoothStep(0f, 1f, v));
+
+        int width = Hmap.m_width;
+        int n = width + 1;
+        float gx = Mathf.Clamp(u * width, 0f, width);
+        float gy = Mathf.Clamp(v * width, 0f, width);
+        int x0 = Mathf.Min((int)gx, width - 1);
+        int y0 = Mathf.Min((int)gy, width - 1);
+        float tx = gx - x0, ty = gy - y0;
+        Color32 c00 = _paintColors[y0 * n + x0];
+        Color32 c10 = _paintColors[y0 * n + x0 + 1];
+        Color32 c01 = _paintColors[(y0 + 1) * n + x0];
+        Color32 c11 = _paintColors[(y0 + 1) * n + x0 + 1];
+        return Color32.Lerp(Color32.Lerp(c00, c10, tx), Color32.Lerp(c01, c11, tx), ty);
     }
 
     // No floor until the initial mesh is in - pin loose bodies kinematic so they don't fall out

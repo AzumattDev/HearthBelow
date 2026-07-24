@@ -31,21 +31,14 @@ public static class TerrainOp_Awake_Patch
 
         if (!VoxelWorld.IsCarvedGroundAt(pos))
             return;
+        // vanilla InternalDoOperation applies level, raise, smooth independently and in this order
         TerrainOp.Settings settings = __instance.m_settings;
+        if (settings.m_level)
+            VoxelWorld.FlattenAt(pos + Vector3.up * settings.m_levelOffset, Mathf.Max(1.5f, settings.m_levelRadius), settings.m_square);
         if (settings.m_raise)
-        {
-            VoxelWorld.RaiseAt(pos, settings.m_raiseRadius, settings.m_raiseDelta, settings.m_raisePower);
-        }
-        else if (settings.m_level)
-        {
-            VoxelWorld.FlattenAt(pos + Vector3.up * settings.m_levelOffset, Mathf.Max(1.5f, settings.m_levelRadius));
-            if (settings.m_smooth)
-                VoxelWorld.SmoothAt(pos + Vector3.up * settings.m_levelOffset, Mathf.Max(2f, settings.m_smoothRadius));
-        }
-        else if (settings.m_smooth)
-        {
+            VoxelWorld.RaiseAt(pos, settings.m_raiseRadius, settings.m_raiseDelta, settings.m_raisePower, settings.m_square);
+        if (settings.m_smooth)
             VoxelWorld.SmoothAt(pos + Vector3.up * settings.m_levelOffset, Mathf.Max(2f, settings.m_smoothRadius));
-        }
     }
 }
 
@@ -54,12 +47,13 @@ public static class TerrainComp_InternalDoOperation_Patch
 {
     private static void Prefix(Vector3 pos, TerrainOp.Settings modifier)
     {
+        if (VoxelWorld.IsVoxelizedAt(pos) || VoxelWorld.HasSavedOpsAt(pos))
+            modifier.m_paintHeightCheck = false;
         if (!VoxelWorld.IsCarvedGroundAt(pos))
             return;
         modifier.m_level = false;
         modifier.m_raise = false;
         modifier.m_smooth = false;
-        modifier.m_paintHeightCheck = false;
         // the paint mask is 2D and shared with the surface above - painting down here WILL
         // show up top, and honestly, it pisses me off. Not sure how to get around this yet, so config for now.
         if (HearthBelowPlugin.UndergroundPainting.Value != HearthBelowPlugin.Toggle.On)

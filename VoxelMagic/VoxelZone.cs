@@ -54,6 +54,11 @@ public class VoxelZone
     private float[] _colMinH = null!, _colMaxH = null!;
     private float[] _heights = null!;
     private int _heightsChecksum;
+    // baked straight from Hmap.m_renderMesh, so it carries vanilla's real paint (path/paved/
+    // cultivated) plus whatever any mod (e.g. TerrainHoe) bakes into that mesh's vertex colors -
+    // no need to reimplement or reflect into anyone else's paint logic
+    private Color32[]? _paintColors;
+    private readonly List<Color32> _paintColorsScratch = [];
     private bool _swapPending;
     private readonly Stopwatch _swapWatch = new();
     private long _meshTicks;
@@ -163,7 +168,26 @@ public class VoxelZone
         _colMinH = new float[_chunksX * _chunksZ];
         _colMaxH = new float[_chunksX * _chunksZ];
         UpdateColumnRanges(0, _chunksX - 1, 0, _chunksZ - 1);
+        RefreshPaintColors();
         return true;
+    }
+
+    // vanilla (and any mod hooking Heightmap.RebuildRenderMesh, e.g. TerrainHoe's custom paints)
+    // writes its final per-vertex color into Hmap.m_renderMesh - sample that directly instead of
+    // recomputing biome blending myself, so cave floors always match whatever the surface shows
+    private void RefreshPaintColors()
+    {
+        Mesh? renderMesh = Hmap.m_renderMesh;
+        int n = Hmap.m_width + 1;
+        if (renderMesh == null || renderMesh.vertexCount != n * n)
+        {
+            _paintColors = null;
+            return;
+        }
+
+        _paintColorsScratch.Clear();
+        renderMesh.GetColors(_paintColorsScratch);
+        _paintColors = _paintColorsScratch.Count == n * n ? _paintColorsScratch.ToArray() : null;
     }
 
     private float SampleWorldHeight(int gx, int gz, int n, Vector3 hp)
@@ -238,10 +262,18 @@ public class VoxelZone
         if (Hmap == null || Hmap.m_heights == null || Hmap.m_heights.Count == 0)
             return;
         // every ZDO write (my own carve saves included) pokes the heightmap and lands here,
-        // so only rebuild when the heights actually changed
+        // so only rebuild the geometry when the heights actually changed
         int checksum = ComputeHeightsChecksum();
         if (checksum == _heightsChecksum)
+        {
+            // heights are identical but Regenerate() still ran, so this was a paint-only change
+            // (vanilla path/paved/cultivated, or a mod's custom paint) - repaint without touching
+            // geometry
+            RefreshPaintColors();
+            if (!_swapPending && Root != null)
+                ForceRemeshAll();
             return;
+        }
 
         if (!_swapPending && Root != null && TryIncrementalHeightsUpdate())
         {
@@ -801,7 +833,26 @@ public class VoxelZone
         float u = Mathf.Clamp01((world.x - _zoneMinX) / _zoneSize);
         float v = Mathf.Clamp01((world.z - _zoneMinZ) / _zoneSize);
         uv = new Vector2(u, v);
-        color = (Color32)Hmap.GetBiomeColor(DUtils.SmoothStep(0f, 1f, u), DUtils.SmoothStep(0f, 1f, v));
+        color = SamplePaintColor(u, v);
+    }
+
+    private Color32 SamplePaintColor(float u, float v)
+    {
+        if (_paintColors == null)
+            return (Color32)Hmap.GetBiomeColor(DUtils.SmoothStep(0f, 1f, u), DUtils.SmoothStep(0f, 1f, v));
+
+        int width = Hmap.m_width;
+        int n = width + 1;
+        float gx = Mathf.Clamp(u * width, 0f, width);
+        float gy = Mathf.Clamp(v * width, 0f, width);
+        int x0 = Mathf.Min((int)gx, width - 1);
+        int y0 = Mathf.Min((int)gy, width - 1);
+        float tx = gx - x0, ty = gy - y0;
+        Color32 c00 = _paintColors[y0 * n + x0];
+        Color32 c10 = _paintColors[y0 * n + x0 + 1];
+        Color32 c01 = _paintColors[(y0 + 1) * n + x0];
+        Color32 c11 = _paintColors[(y0 + 1) * n + x0 + 1];
+        return Color32.Lerp(Color32.Lerp(c00, c10, tx), Color32.Lerp(c01, c11, tx), ty);
     }
 
     // No floor until the initial mesh is in - pin loose bodies kinematic so they don't fall out

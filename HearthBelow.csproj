@@ -125,8 +125,10 @@
         <Compile Include="Patches\CharacterPatches.cs" />
         <Compile Include="Patches\EnvironmentPatches.cs" />
         <Compile Include="Patches\FireplacePatches.cs" />
+        <Compile Include="Patches\GroundHeightPatches.cs" />
         <Compile Include="Patches\HeightmapPatches.cs" />
         <Compile Include="Patches\PathfindingPatches.cs" />
+        <Compile Include="Patches\PlacementPatches.cs" />
         <Compile Include="Patches\TerrainCheckPatches.cs" />
         <Compile Include="Patches\TerminalPatches.cs" />
         <Compile Include="Patches\TerrainCompPatches.cs" />

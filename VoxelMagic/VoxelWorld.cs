@@ -352,26 +352,21 @@ public static class VoxelWorld
             TerrainComp comp = hmap.GetAndCreateTerrainCompiler();
             if (comp == null)
                 continue;
-            bool persistedOrSent = false;
             ZNetView nview = comp.m_nview;
             if (nview != null && nview.IsValid())
             {
                 if (nview.IsOwner())
                 {
-                    persistedOrSent = AppendAndSave(comp, op);
+                    if (AppendAndSave(comp, op))
+                        ApplyLocal(hmap, op);
                 }
                 else
                 {
                     ZPackage pkg = new();
                     op.Write(pkg);
                     nview.InvokeRPC("HearthBelow_Carve", pkg);
-                    persistedOrSent = true;
                 }
             }
-
-            // never show locally what didn't make it into the persistent data
-            if (persistedOrSent)
-                ApplyLocal(hmap, op);
         }
 
         if (!anyEffect && noEffectMessage != null)

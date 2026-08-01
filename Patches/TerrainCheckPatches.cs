@@ -5,8 +5,7 @@ using UnityEngine;
 
 namespace HearthBelow.Patches;
 
-// Honestly, the amount of places the game checks objects under the terrain in the code was a little dumb. If I didn't have a decompiled project of their shit
-// this would have been much harder to find. Big thanks to JamesJones for testing this.
+// the game checks under-terrain in a lot of places. Big thanks to JamesJones for testing this.
 
 [HarmonyPatch(typeof(ItemDrop), nameof(ItemDrop.TerrainCheck))]
 public static class ItemDrop_TerrainCheck_Patch

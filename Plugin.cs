@@ -17,7 +17,7 @@ namespace HearthBelow;
 public class HearthBelowPlugin : BaseUnityPlugin
 {
     internal const string ModName = "HearthBelow";
-    internal const string ModVersion = "0.3.2";
+    internal const string ModVersion = "0.3.3";
     internal const string Author = "Azumatt";
     private const string ModGUID = Author + "." + ModName;
     private static string ConfigFileName = ModGUID + ".cfg";
@@ -73,6 +73,8 @@ public class HearthBelowPlugin : BaseUnityPlugin
         UndergroundEnvironment = config("3 - Underground", "Underground Environment", "Darklands_dark", new ConfigDescription("Ambience/weather while you are deep inside a cave, applied the same way vanilla dungeons do it (fades in and out like a weather change). Vanilla options: Crypt (dark - bring a torch), SunkenCrypt, Caves (frost caves), InfectedMine. Not case sensitive. Leave empty to keep the outside weather underground.", null, new ConfigurationManagerAttributes { Order = 79 }), false);
         UndergroundEnvironmentDepth = config("3 - Underground", "Underground Environment Depth", 16f, new ConfigDescription("How many meters below the original surface you must be before the cave ambience starts. Keeps shallow dugouts and walk-in basements feeling like the outdoors. The default 16 lines up with the bronze pickaxe's depth limit, so darkness arrives with iron-tier digging.", new AcceptableValueRange<float>(2f, 32f), new ConfigurationManagerAttributes { Order = 78 }), false);
         UndergroundPainting = config("3 - Underground", "Underground Painting", Toggle.On, new ConfigDescription("Let hoe paths/paving paint cave floors. Heads up: the game stores terrain paint top-down with no depth, so a painted cave floor also shows on the ground directly above the cave. Turn off if clean surfaces matter more to you than paintable cave floors.", null, new ConfigurationManagerAttributes { Order = 77 }));
+        CaveWeatherCover = config("3 - Underground", "Cave Weather Shelter Cover", 0.6f, new ConfigDescription("How enclosed a spot has to be before rain and snow stop reaching you, as a fraction of vanilla's 17 cover rays that must hit rock (vanilla asks 0.8 for a roofed house). Lower it if weather still reaches too far into your caves, raise it if it cuts out too soon after you step inside.", new AcceptableValueRange<float>(0.3f, 1f), new ConfigurationManagerAttributes { Order = 75 }), false);
+        CaveWeatherParticles = config("3 - Underground", "Cave Weather Particles", "rain,snow,sleet,hail,ash", new ConfigDescription("Which of an environment's particle effects rock overhead switches off, matched as comma separated pieces of their names. An environment ships one list holding everything it shows - Rain's is Rain, GroundMist, FogClouds and OceanMist - so this is what separates weather falling out of the sky from ambient effects a cave is meant to keep. Add a name here if another mod's weather still follows you underground.", null, new ConfigurationManagerAttributes { Order = 74 }), false);
 
         Assembly assembly = Assembly.GetExecutingAssembly();
         _harmony.PatchAll(assembly);
@@ -163,6 +165,8 @@ public class HearthBelowPlugin : BaseUnityPlugin
     internal static ConfigEntry<string> UndergroundEnvironment = null!;
     internal static ConfigEntry<float> UndergroundEnvironmentDepth = null!;
     internal static ConfigEntry<Toggle> UndergroundPainting = null!;
+    internal static ConfigEntry<float> CaveWeatherCover = null!;
+    internal static ConfigEntry<string> CaveWeatherParticles = null!;
 
     private ConfigEntry<T> config<T>(string group, string name, T value, ConfigDescription description, bool synchronizedSetting = true)
     {

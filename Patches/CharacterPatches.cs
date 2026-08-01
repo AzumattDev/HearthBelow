@@ -16,8 +16,7 @@ public static class Character_UnderWorldCheck_Patch
     }
 }
 
-// A character that loads in before its cave finishes meshing has no floor and would free-fall
-// out of the grid. I copied this shit from how teleporting works.
+// characters loading in before their cave meshes would free-fall; same trick as teleporting
 [HarmonyPatch(typeof(Character), nameof(Character.CustomFixedUpdate))]
 public static class Character_CustomFixedUpdate_Patch
 {

@@ -5,8 +5,7 @@ using UnityEngine.AI;
 
 namespace HearthBelow.Patches;
 
-//SnapToNavMesh clamps path endpoints up to "ground height" (monsters pace on the surface above you), and
-// IsUnderTerrain throws away paths > 1m below it. Both prefixes bail unless the point is in carved cave air.
+// SnapToNavMesh and IsUnderTerrain both reject cave air - bail unless the point is carved
 [HarmonyPatch(typeof(Pathfinding), nameof(Pathfinding.SnapToNavMesh))]
 public static class Pathfinding_SnapToNavMesh_Patch
 {

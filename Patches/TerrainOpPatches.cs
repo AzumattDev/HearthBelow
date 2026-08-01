@@ -47,15 +47,14 @@ public static class TerrainComp_InternalDoOperation_Patch
 {
     private static void Prefix(Vector3 pos, TerrainOp.Settings modifier)
     {
-        if (VoxelWorld.IsVoxelizedAt(pos) || VoxelWorld.HasSavedOpsAt(pos))
+        if (VoxelWorld.IsCarvedZoneAt(pos) || VoxelWorld.HasSavedOpsAt(pos))
             modifier.m_paintHeightCheck = false;
         if (!VoxelWorld.IsCarvedGroundAt(pos))
             return;
         modifier.m_level = false;
         modifier.m_raise = false;
         modifier.m_smooth = false;
-        // the paint mask is 2D and shared with the surface above - painting down here WILL
-        // show up top, and honestly, it pisses me off. Not sure how to get around this yet, so config for now.
+        // the paint mask is 2D and shared with the surface above, so painting down here shows up top
         if (HearthBelowPlugin.UndergroundPainting.Value != HearthBelowPlugin.Toggle.On)
             modifier.m_paintCleared = false;
     }

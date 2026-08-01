@@ -3,15 +3,28 @@ using HearthBelow.VoxelMagic;
 
 namespace HearthBelow.Patches;
 
-// Sink the finalized LOD heights here so both collision and render meshes build correctly once.
+[HarmonyPatch(typeof(Heightmap), nameof(Heightmap.RebuildRenderMesh))]
+public static class Heightmap_RebuildRenderMesh_LodPatch
+{
+    private static void Postfix(Heightmap __instance)
+    {
+        if (!__instance.IsDistantLod)
+        {
+            VoxelWorld.GetZone(__instance)?.OnVanillaRenderMeshRebuilt();
+            return;
+        }
+
+        DistantLod.Register(__instance);
+        DistantLod.StripUnderActiveZones(__instance, __instance.m_renderMesh);
+    }
+}
+
 [HarmonyPatch(typeof(Heightmap), nameof(Heightmap.RebuildCollisionMesh))]
 public static class Heightmap_RebuildCollisionMesh_Patch
 {
-    private static void Prefix(Heightmap __instance)
+    private static void Postfix(Heightmap __instance)
     {
-        if (!__instance.IsDistantLod)
-            return;
-        DistantLod.Register(__instance);
-        DistantLod.SinkUnderActiveZones(__instance);
+        if (__instance.IsDistantLod)
+            DistantLod.Register(__instance);
     }
 }

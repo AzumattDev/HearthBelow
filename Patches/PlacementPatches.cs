@@ -25,9 +25,8 @@ public static class Player_PieceRayTest_Patch
         if (!Physics.SphereCast(cam.position, FallbackSphereRadius, cam.forward, out RaycastHit hitInfo, 50f, layerMask))
             return;
 
-        // gate on where the cursor actually landed, not the player's feet - leveling/paving is
-        // usually aimed several meters down the tunnel, well past the player's own zone boundary
-        if (!VoxelWorld.IsVoxelizedAt(hitInfo.point))
+        // gate on the cursor, not the player's feet - ops aim well past their own zone
+        if (!VoxelWorld.IsCarvedZoneAt(hitInfo.point))
             return;
 
         // same maxPlaceDistance + extra-placement-distance logic vanilla applies after its raycast hits

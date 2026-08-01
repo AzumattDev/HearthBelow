@@ -4,23 +4,46 @@ using UnityEngine;
 namespace HearthBelow.VoxelMagic;
 
 // TerrainLod ignores every edit, so inside a dug-out mountain it shows as a white walk-through
-// sheet. Sink its verts under active voxel zones - the real mesh renders there anyway.
 public static class DistantLod
 {
-    // sunk this far below the zone's grid floor, no carve can ever reach the sheet
-    private const float SinkMargin = 4f;
-    
     private static readonly List<Heightmap> LodMaps = [];
+
+    private static readonly HashSet<Heightmap> Pending = [];
+    private static int _lastFlushFrame = -1;
+
+    private static readonly List<Vector3> StripVerts = [];
+    private static readonly List<int> StripTris = [];
+    private static readonly List<int> StripKept = [];
+    private static readonly HashSet<Vector2Int> ActiveZones = [];
 
     public static void Register(Heightmap lod)
     {
-        if (!LodMaps.Contains(lod)) 
+        if (!LodMaps.Contains(lod))
             LodMaps.Add(lod);
     }
 
-    public static void Unregister(Heightmap lod) => LodMaps.Remove(lod);
+    public static void Unregister(Heightmap lod)
+    {
+        LodMaps.Remove(lod);
+        Pending.Remove(lod);
+    }
 
-    // a zone gained or lost its mesh - regenerate the LOD tiles over it so they re-sink or un-sink
+    public static void SetVisible(bool visible)
+    {
+        for (int i = LodMaps.Count - 1; i >= 0; --i)
+        {
+            Heightmap lod = LodMaps[i];
+            if (lod == null)
+            {
+                LodMaps.RemoveAt(i);
+                continue;
+            }
+
+            if (lod.m_meshRenderer != null)
+                lod.m_meshRenderer.enabled = visible;
+        }
+    }
+
     public static void RefreshAt(Heightmap zoneHmap)
     {
         if (zoneHmap == null)
@@ -40,42 +63,76 @@ public static class DistantLod
             Vector3 lp = lod.transform.position;
             if (Mathf.Abs(c.x - lp.x) > lodHalf + half || Mathf.Abs(c.z - lp.z) > lodHalf + half)
                 continue;
-            lod.Regenerate();
+            Pending.Add(lod);
         }
     }
 
-    // called right before the LOD tile builds its meshes, heights freshly copied from build data
-    public static void SinkUnderActiveZones(Heightmap lod)
+    public static void FlushPending()
     {
-        int num = lod.m_width + 1;
-        float scale = lod.m_scale;
-        Vector3 lp = lod.transform.position;
-        float lodMinX = lp.x - lod.m_width * scale * 0.5f;
-        float lodMinZ = lp.z - lod.m_width * scale * 0.5f;
+        if (Pending.Count == 0 || _lastFlushFrame == Time.frameCount)
+            return;
+        _lastFlushFrame = Time.frameCount;
+        foreach (Heightmap lod in Pending)
+        {
+            if (lod != null)
+                lod.Regenerate();
+        }
+
+        Pending.Clear();
+    }
+
+    public static bool StripUnderActiveZones(Heightmap lod, Mesh? mesh)
+    {
+        if (lod == null || mesh == null)
+            return false;
+
+        ActiveZones.Clear();
+        float zoneSize = 0f;
         foreach (KeyValuePair<Heightmap, VoxelZone> pair in VoxelWorld.Zones)
         {
             Heightmap zh = pair.Key;
-            VoxelZone zone = pair.Value;
-            if (zh == null || zone is not { IsActive: true })
+            if (zh == null || pair.Value is not { IsActive: true, HasCarvedGeometry: true })
+                continue;
+            zoneSize = zh.m_width * zh.m_scale;
+            if (zoneSize <= 0f)
                 continue;
             Vector3 c = zh.transform.position;
-            float half = zh.m_width * zh.m_scale * 0.5f;
-            int x0 = Mathf.Max(0, Mathf.CeilToInt((c.x - half - lodMinX) / scale));
-            int x1 = Mathf.Min(lod.m_width, Mathf.FloorToInt((c.x + half - lodMinX) / scale));
-            int z0 = Mathf.Max(0, Mathf.CeilToInt((c.z - half - lodMinZ) / scale));
-            int z1 = Mathf.Min(lod.m_width, Mathf.FloorToInt((c.z + half - lodMinZ) / scale));
-            if (x1 < x0 || z1 < z0)
-                continue;
-            float sunk = zone.Origin.y - SinkMargin - lp.y;
-            for (int z = z0; z <= z1; ++z)
-            {
-                int row = z * num;
-                for (int x = x0; x <= x1; ++x)
-                {
-                    if (lod.m_heights[row + x] > sunk)
-                        lod.m_heights[row + x] = sunk;
-                }
-            }
+            ActiveZones.Add(ZoneKey(c.x, c.z, zoneSize));
         }
+
+        if (ActiveZones.Count == 0 || zoneSize <= 0f)
+            return false;
+
+        StripVerts.Clear();
+        StripTris.Clear();
+        mesh.GetVertices(StripVerts);
+        mesh.GetTriangles(StripTris, 0);
+        if (StripTris.Count == 0)
+            return false;
+
+        Transform t = lod.transform;
+        StripKept.Clear();
+        for (int i = 0; i + 2 < StripTris.Count; i += 3)
+        {
+            Vector3 local = (StripVerts[StripTris[i]] + StripVerts[StripTris[i + 1]] + StripVerts[StripTris[i + 2]]) / 3f;
+            Vector3 world = t.TransformPoint(local);
+            if (ActiveZones.Contains(ZoneKey(world.x, world.z, zoneSize)))
+                continue;
+            StripKept.Add(StripTris[i]);
+            StripKept.Add(StripTris[i + 1]);
+            StripKept.Add(StripTris[i + 2]);
+        }
+
+        if (StripKept.Count == StripTris.Count)
+            return false;
+        mesh.SetTriangles(StripKept, 0);
+        return true;
+    }
+
+    private static Vector2Int ZoneKey(float worldX, float worldZ, float zoneSize)
+    {
+        return new Vector2Int(
+            Mathf.FloorToInt(worldX / zoneSize + 0.5f),
+            Mathf.FloorToInt(worldZ / zoneSize + 0.5f));
     }
 }

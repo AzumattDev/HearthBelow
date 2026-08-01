@@ -15,7 +15,7 @@ public static class ZoneSystem_GetGroundHeight_Patch
 
     private static bool Prefix(Vector3 p, ref float __result)
     {
-        if (!VoxelWorld.IsVoxelizedAt(p))
+        if (!VoxelWorld.IsCarvedZoneAt(p))
             return true;
 
         Vector3 origin = p with { y = p.y + LocalCastStartOffset };

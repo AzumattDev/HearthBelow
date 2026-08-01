@@ -27,6 +27,15 @@ public static class TerrainComp_Update_Patch
     }
 }
 
+[HarmonyPatch(typeof(Game), nameof(Game.Update))]
+public static class Game_Update_Patch
+{
+    private static void Postfix()
+    {
+        VoxelWorld.PumpAllZones();
+    }
+}
+
 [HarmonyPatch(typeof(TerrainComp), nameof(TerrainComp.OnDestroy))]
 public static class TerrainComp_OnDestroy_Patch
 {

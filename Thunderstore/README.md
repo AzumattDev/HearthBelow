@@ -38,6 +38,10 @@ world-saving and multiplayer systems.
   enough down, a dungeon-style ambience fades in (configurable per player, or off). Log out in a
   cave and you log back in there; tombstones, drops, and loot stay down instead of popping
   topside.
+- **Weather stays outside.** Rock overhead counts as shelter: rain, snow and ash stop falling on
+  you underground, the ground stops looking wet, and you get vanilla's Sheltered buff, muffled
+  indoor sound and calm air - the same as standing in a roofed house. Weather still reaches in
+  near a cave mouth, and `hearthbelow weather` explains why any given spot does or doesn't count.
 - **Creatures follow you in.** The navmesh is built from the voxel terrain, so monsters path
   into your tunnels. Sealing the entrance with raised ground still works as a defense.
 - **Multiplayer + persistence.** Works on existing worlds. Carves are tiny operations stored on
@@ -63,14 +67,30 @@ Singleplayer / local hosting works out of the box.
 
 ---
 
-- `hearthbelow carve [radius]` - carve at the crosshair (up to 100m).
+The terrain-editing ones (`carve`, `fill`, `raise`, `flatten`, `smooth`, `restore`) are admin
+only on a server. They act on the terrain under your crosshair, up to 100m away, with an optional
+radius argument between 0.25m and 6m (default: your `Carve Radius` config).
+
+- `hearthbelow carve [radius]` - carve at the crosshair (always full radius, no gradual bite).
 - `hearthbelow fill [radius]` - fill material back in at the crosshair.
+- `hearthbelow raise [radius]` - raise the ground at the crosshair, like the hoe.
 - `hearthbelow flatten [radius]` - level the floor at the crosshair and carve headroom above it.
 - `hearthbelow smooth [radius]` - blend the floor toward the crosshair height with falloff.
 - `hearthbelow restore` - remove **all** voxel edits in the zone you are standing in (including
   digs crossing in over its borders) and restore the vanilla heightmap. Careful: entombs
   anything built in that zone's caves.
-- `hearthbelow info` - voxelization info for your current zone.
+- `hearthbelow info` - voxelization info for your current zone (this is the default with no
+  argument).
+- `hearthbelow weather` - why the spot you're standing in does or doesn't count as sheltered.
+
+Diagnostics, mostly useful when reporting a bug (output also goes to the log):
+
+- `hearthbelow show [all|voxel|vanilla|lod]` - draw only one of the three terrain meshes within
+  300m, to see which one an artifact belongs to. `all` restores normal rendering.
+- `hearthbelow holes [tolerance]` - look for unclosed mesh edges between neighbouring zones
+  within 24m.
+- `hearthbelow remesh` - rebuild every chunk mesh in your current zone.
+- `hearthbelow meshinfo` - mesh, renderer and material details for the ground you're on.
 
 ## Config (synced from server, except where noted)
 
@@ -78,7 +98,8 @@ Singleplayer / local hosting works out of the box.
 
 | Setting                       | Default             | Description                                                                                                    |
 |-------------------------------|---------------------|----------------------------------------------------------------------------------------------------------------|
-| Voxel Digging                 | On                  | Pickaxe carves caves instead of lowering terrain                                                               |
+| Lock Configuration            | On                  | Only server admins can change the synced settings                                                              |
+| Voxel Digging                 | On                  | Pickaxe carves caves instead of lowering terrain (master switch, also gates cave shelter)                      |
 | Dig Mode                      | Gradual             | Gradual = shallow vanilla-like bites per hit, Blast = full radius at once                                      |
 | Dig Depth Per Hit             | 0.75                | How deep each hit bites into the surface (Gradual mode)                                                        |
 | Carve Radius                  | 1.6                 | Width of the dig per pickaxe hit                                                                               |
@@ -90,6 +111,8 @@ Singleplayer / local hosting works out of the box.
 | Underground Environment       | Darklands_dark      | Cave ambience (also: Crypt, SunkenCrypt, Caves, InfectedMine; empty = outside weather). Per player, not synced |
 | Underground Environment Depth | 16                  | Meters below the surface before the ambience fades in (default = bronze's dig limit). Per player, not synced   |
 | Underground Painting          | On                  | Hoe paths/paving paint cave floors (also shows on the surface above - see limitations)                         |
+| Cave Weather Shelter Cover    | 0.6                 | How enclosed a spot must be before weather stops reaching it (vanilla asks 0.8 for a house). Per player        |
+| Cave Weather Particles        | rain,snow,sleet,hail,ash | Which particle effects rock overhead switches off, matched by name. Per player, not synced               |
 
 Avoid changing `Max Cave Depth` on a world that already has deep caves - existing carves below
 the new limit will be clamped away.
@@ -145,6 +168,10 @@ values with positive values above and below it, so overhangs and tunnels come fo
 - **Digging is subtraction.** A pickaxe hit subtracts a sphere/cube of density; the hoe adds it
   back. Zones are meshed in 16×16×16 chunks and only the chunks that changed are remeshed,
   which is what keeps digging cheap.
+- **The distant terrain follows along.** Valheim draws far-away ground as a coarse heightmap
+  sheet that knows nothing about caves, which would otherwise show up as a wall or a sunken step
+  across a zone you've dug into. Dug zones are cut out of that sheet, so what you see at range
+  matches what you walk on.
 - **Persistence is replay.** The grid itself is never saved - that would be megabytes. Instead,
   each dig is stored as a tiny operation on the zone's TerrainComp ZDO (the same networked
   object vanilla uses for terrain edits), and the grid is rebuilt from heightmap + replayed ops

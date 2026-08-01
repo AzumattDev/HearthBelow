@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 
 namespace HearthBelow.VoxelMagic;
@@ -17,12 +18,27 @@ public class VoxelZone
 
     private const float GridHeadroom = 6f;
 
+    private const float SkinBelow = 32f;
+
+    private const float GridFloorMargin = 2f;
+
+    private const float GrowthHeadroom = 32f;
+
+    private static float OpFloorY(CarveOp op)
+    {
+        if (op.Type is not ((byte)VoxelOpType.Carve or (byte)VoxelOpType.Scoop))
+            return float.MaxValue;
+        float reach = op.Type == (byte)VoxelOpType.Scoop ? Mathf.Max(op.Radius, op.Depth) : op.Radius;
+        float bottom = op.Point.y - reach - 3f;
+        return float.IsNegativeInfinity(op.FloorY) ? bottom : Mathf.Max(bottom, op.FloorY - 3f);
+    }
+
     // vertical span flatten/smooth bother to touch around the aim point
     private const float PlaneOpBand = 4.5f;
 
     public Heightmap Hmap = null!;
     public GameObject? Root;
-    public float[] Density = null!;
+    public float[]? Density;
     public int NX, NY, NZ; // sample counts; NX == NZ == heightmap width + 3 (1 shared border sample on every side)
     public Vector3 Origin; // world position of sample (0,0,0)
     public float HorizontalSpacing = 1f;
@@ -30,11 +46,22 @@ public class VoxelZone
 
     public bool NeighborVoxPX, NeighborVoxNX, NeighborVoxPZ, NeighborVoxNZ;
 
-    public readonly List<CarveOp> Ops = [];
-    public readonly HashSet<int> AppliedIds = [];
+    private const int OwnedLo = 1;
+    private int _ownedHiX, _ownedHiZ;
 
-    // colliders live on the Heightmap's own GameObject, NOT the chunk child: half the damn
-    // game does hitInfo.collider.GetComponent<Heightmap>() and dereferences without checking
+    private readonly VoxelZone?[] _neighbors = new VoxelZone?[9];
+
+    private int _zoneStride;
+
+    public bool HasNeighborPX => _neighbors[1 * 3 + 2] != null;
+    public bool HasNeighborNX => _neighbors[1 * 3 + 0] != null;
+    public bool HasNeighborPZ => _neighbors[2 * 3 + 1] != null;
+    public bool HasNeighborNZ => _neighbors[0 * 3 + 1] != null;
+
+    public readonly List<CarveOp> Ops = [];
+    public readonly HashSet<CarveOp.Key> AppliedKeys = [];
+
+    // colliders belong on the Heightmap GameObject, not the chunk child - callers assume it
     private class Chunk
     {
         public GameObject Go = null!;
@@ -45,18 +72,25 @@ public class VoxelZone
     private readonly Dictionary<Vector3Int, Chunk> _chunks = new();
     private readonly HashSet<Vector3Int> _carvedChunks = [];
     private readonly List<Vector3Int> _pumpList = [];
+    private readonly HashSet<Vector3Int> _opChunks = [];
     private static readonly Stopwatch PumpWatch = new();
-    private const long PumpBudgetMs = 5;
+    private static int _pumpFrame = -1;
+    private const long PumpBudgetMs = 3;
     private Material? _material;
+    private UnityEngine.Rendering.ShadowCastingMode _shadowMode = UnityEngine.Rendering.ShadowCastingMode.On;
+    private bool _receiveShadows = true;
+    private UnityEngine.Rendering.LightProbeUsage _lightProbes = UnityEngine.Rendering.LightProbeUsage.Off;
+    private UnityEngine.Rendering.ReflectionProbeUsage _reflectionProbes = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+    private bool _needTangents;
+    private Vector4[]? _vanillaTangents;
+    private static readonly List<Vector4> TangentScratch = [];
     private int _layer;
     private float _zoneMinX, _zoneMinZ, _zoneSize;
     private int _chunksX, _chunksY, _chunksZ;
     private float[] _colMinH = null!, _colMaxH = null!;
     private float[] _heights = null!;
     private int _heightsChecksum;
-    // baked straight from Hmap.m_renderMesh, so it carries vanilla's real paint (path/paved/
-    // cultivated) plus whatever any mod (e.g. TerrainHoe) bakes into that mesh's vertex colors -
-    // no need to reimplement or reflect into anyone else's paint logic
+    // baked from Hmap.m_renderMesh, so it carries vanilla and mod paint for free
     private Color32[]? _paintColors;
     private readonly List<Color32> _paintColorsScratch = [];
     private bool _swapPending;
@@ -65,7 +99,88 @@ public class VoxelZone
     private int _meshFrames;
     private readonly List<Rigidbody> _frozenBodies = [];
 
-    public float D(int gx, int gy, int gz) => Density[(gy * NZ + gz) * NX + gx];
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public float D(int gx, int gy, int gz)
+    {
+        if (gx >= OwnedLo && gx <= _ownedHiX && gz >= OwnedLo && gz <= _ownedHiZ)
+            return Owned(gx, gy, gz);
+        return Foreign(gx, gy, gz);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private float Owned(int gx, int gy, int gz)
+    {
+        float[]? density = Density;
+        return density != null
+            ? density[(gy * NZ + gz) * NX + gx]
+            : Mathf.Clamp(_heights[gz * NX + gx] - (Origin.y + gy * VerticalSpacing), -DensityRange, DensityRange);
+    }
+
+    private void EnsureDensity()
+    {
+        if (Density != null)
+            return;
+        float[] density = new float[NX * NY * NZ];
+        for (int gy = 0; gy < NY; ++gy)
+        {
+            float y = Origin.y + gy * VerticalSpacing;
+            for (int gz = 0; gz < NZ; ++gz)
+            {
+                int row = gz * NX;
+                int drow = (gy * NZ + gz) * NX;
+                for (int gx = 0; gx < NX; ++gx)
+                    density[drow + gx] = Mathf.Clamp(_heights[row + gx] - y, -DensityRange, DensityRange);
+            }
+        }
+
+        Density = density;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public float H(int gx, int gz)
+    {
+        if (gx >= OwnedLo && gx <= _ownedHiX && gz >= OwnedLo && gz <= _ownedHiZ)
+            return _heights[gz * NX + gx];
+        return ForeignHeight(gx, gz);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private float ForeignHeight(int gx, int gz)
+    {
+        int dx = gx < OwnedLo ? -1 : gx > _ownedHiX ? 1 : 0;
+        int dz = gz < OwnedLo ? -1 : gz > _ownedHiZ ? 1 : 0;
+        VoxelZone? owner = _neighbors[(dz + 1) * 3 + (dx + 1)];
+        if (owner is { _heights: not null } && owner._zoneStride == _zoneStride)
+        {
+            int ox = gx - dx * _zoneStride;
+            int oz = gz - dz * _zoneStride;
+            if (ox >= OwnedLo && ox <= owner._ownedHiX && oz >= OwnedLo && oz <= owner._ownedHiZ)
+                return owner._heights[oz * owner.NX + ox];
+        }
+
+        return _heights[Mathf.Clamp(gz, 0, NZ - 1) * NX + Mathf.Clamp(gx, 0, NX - 1)];
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private float Foreign(int gx, int gy, int gz)
+    {
+        int dx = gx < OwnedLo ? -1 : gx > _ownedHiX ? 1 : 0;
+        int dz = gz < OwnedLo ? -1 : gz > _ownedHiZ ? 1 : 0;
+        VoxelZone? owner = _neighbors[(dz + 1) * 3 + (dx + 1)];
+        if (owner is { _heights: not null } && owner._zoneStride == _zoneStride)
+        {
+            int ox = gx - dx * _zoneStride;
+            int oz = gz - dz * _zoneStride;
+            int oy = gy + Mathf.RoundToInt(Origin.y - owner.Origin.y);
+            if (ox >= OwnedLo && ox <= owner._ownedHiX && oz >= OwnedLo && oz <= owner._ownedHiZ
+                && oy >= 0 && oy < owner.NY)
+                return owner.Owned(ox, oy, oz);
+        }
+
+        int cx = Mathf.Clamp(gx, 0, NX - 1);
+        int cz = Mathf.Clamp(gz, 0, NZ - 1);
+        return Mathf.Clamp(_heights[cz * NX + cx] - (Origin.y + gy * VerticalSpacing), -DensityRange, DensityRange);
+    }
 
     public bool Build(Heightmap hmap)
     {
@@ -77,9 +192,9 @@ public class VoxelZone
         Root = new GameObject("HearthBelow_Voxels");
         Root.transform.SetParent(hmap.transform, false);
         Root.layer = _layer;
+        Root.SetActive(false);
         RefreshNeighborFlags();
-        // Pump() meshes over several frames; the vanilla heightmap stays active until every
-        // chunk is ready, then everything swaps at once
+        // vanilla heightmap stays up until every chunk is ready, then all swap at once
         MarkAllDirty();
         _swapPending = true;
         _swapWatch.Restart();
@@ -91,6 +206,26 @@ public class VoxelZone
 
     public bool IsActive => Root != null && !_swapPending;
 
+    public bool IsSwapPending => Root != null && _swapPending;
+
+    public int DirtyChunkCount => _dirty.Count;
+
+    public bool HasCarvedGeometry
+    {
+        get
+        {
+            if (Ops.Count > 0)
+                return true;
+            foreach (VoxelZone? n in _neighbors)
+            {
+                if (n is { Ops.Count: > 0 })
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
     public void RefreshNeighborFlags()
     {
         Vector3 c = Hmap.transform.position;
@@ -98,24 +233,32 @@ public class VoxelZone
         NeighborVoxNX = VoxelWorld.IsVoxelizedAt(c - new Vector3(_zoneSize, 0f, 0f));
         NeighborVoxPZ = VoxelWorld.IsVoxelizedAt(c + new Vector3(0f, 0f, _zoneSize));
         NeighborVoxNZ = VoxelWorld.IsVoxelizedAt(c - new Vector3(0f, 0f, _zoneSize));
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                _neighbors[(dz + 1) * 3 + (dx + 1)] = dx == 0 && dz == 0
+                    ? null
+                    : VoxelWorld.GetZone(Heightmap.FindHeightmap(c + new Vector3(dx * _zoneSize, 0f, dz * _zoneSize)));
+            }
+        }
     }
 
     public void OnNeighborChanged()
     {
-        bool px = NeighborVoxPX, nx = NeighborVoxNX, pz = NeighborVoxPZ, nz = NeighborVoxNZ;
+        bool px = HasNeighborPX, nx = HasNeighborNX, pz = HasNeighborPZ, nz = HasNeighborNZ;
         RefreshNeighborFlags();
+        RefreshGhostRing();
         for (int ky = 0; ky < _chunksY; ++ky)
         {
             for (int k = 0; k < _chunksX; ++k)
             {
-                if (px != NeighborVoxPX) _dirty.Add(new Vector3Int(_chunksX - 1, ky, k));
-                if (nx != NeighborVoxNX) _dirty.Add(new Vector3Int(0, ky, k));
-                if (pz != NeighborVoxPZ) _dirty.Add(new Vector3Int(k, ky, _chunksZ - 1));
-                if (nz != NeighborVoxNZ) _dirty.Add(new Vector3Int(k, ky, 0));
+                if (px != HasNeighborPX) _dirty.Add(new Vector3Int(_chunksX - 1, ky, k));
+                if (nx != HasNeighborNX) _dirty.Add(new Vector3Int(0, ky, k));
+                if (pz != HasNeighborPZ) _dirty.Add(new Vector3Int(k, ky, _chunksZ - 1));
+                if (nz != HasNeighborNZ) _dirty.Add(new Vector3Int(k, ky, 0));
             }
         }
-
-        RemeshDirty();
     }
 
     private bool BuildData()
@@ -123,6 +266,9 @@ public class VoxelZone
         int n = Hmap.m_width + 1;
         HorizontalSpacing = Hmap.m_scale;
         NX = NZ = n + 2;
+        _ownedHiX = NX - 3;
+        _ownedHiZ = NZ - 3;
+        _zoneStride = Hmap.m_width;
         _zoneSize = Hmap.m_width * HorizontalSpacing;
         Vector3 hp = Hmap.transform.position;
         _zoneMinX = hp.x - _zoneSize * 0.5f;
@@ -141,24 +287,38 @@ public class VoxelZone
             }
         }
 
-        float minH = Mathf.Floor(min) - HearthBelowPlugin.CaveDepth.Value;
+        float deepest = min - SkinBelow;
+        foreach (CarveOp op in Ops)
+        {
+            float floorY = OpFloorY(op);
+            if (floorY < float.MaxValue)
+                deepest = Mathf.Min(deepest, floorY - GrowthHeadroom);
+        }
+
+        float minH = Mathf.Floor(deepest);
         float maxH = Mathf.Ceil(max) + GridHeadroom;
         NY = Mathf.CeilToInt((maxH - minH) / VerticalSpacing) + 1;
         Origin = new Vector3(_zoneMinX - HorizontalSpacing, minH, _zoneMinZ - HorizontalSpacing);
-        Density = new float[NX * NY * NZ];
-        for (int gy = 0; gy < NY; ++gy)
-        {
-            float y = minH + gy * VerticalSpacing;
-            for (int gz = 0; gz < NZ; ++gz)
-            {
-                int row = gz * NX;
-                int drow = (gy * NZ + gz) * NX;
-                for (int gx = 0; gx < NX; ++gx)
-                    Density[drow + gx] = Mathf.Clamp(_heights[row + gx] - y, -DensityRange, DensityRange);
-            }
-        }
+        Density = null;
 
         _material = Hmap.m_materialInstance;
+        SyncPaintMaskWrapMode();
+        MeshRenderer? vanillaRenderer = Hmap.m_meshRenderer;
+        if (vanillaRenderer != null)
+        {
+            _shadowMode = vanillaRenderer.shadowCastingMode;
+            _receiveShadows = vanillaRenderer.receiveShadows;
+            _lightProbes = vanillaRenderer.lightProbeUsage;
+            _reflectionProbes = vanillaRenderer.reflectionProbeUsage;
+        }
+
+        _needTangents = Hmap.m_renderMesh != null
+                        && Hmap.m_renderMesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Tangent);
+        int tn = Hmap.m_width + 1;
+        _vanillaTangents = _needTangents && Hmap.m_renderMesh!.vertexCount == tn * tn
+            ? Hmap.m_renderMesh.tangents
+            : null;
+        _needTangents = _vanillaTangents != null;
         _layer = Hmap.gameObject.layer;
         _chunksX = Mathf.CeilToInt((NX - 1) / (float)ChunkSize);
         _chunksY = Mathf.CeilToInt((NY - 1) / (float)ChunkSize);
@@ -172,9 +332,7 @@ public class VoxelZone
         return true;
     }
 
-    // vanilla (and any mod hooking Heightmap.RebuildRenderMesh, e.g. TerrainHoe's custom paints)
-    // writes its final per-vertex color into Hmap.m_renderMesh - sample that directly instead of
-    // recomputing biome blending myself, so cave floors always match whatever the surface shows
+    // sample vanilla's final vertex color instead of recomputing biome blending
     private void RefreshPaintColors()
     {
         Mesh? renderMesh = Hmap.m_renderMesh;
@@ -190,6 +348,29 @@ public class VoxelZone
         _paintColors = _paintColorsScratch.Count == n * n ? _paintColorsScratch.ToArray() : null;
     }
 
+    private void SyncPaintMaskWrapMode()
+    {
+        if (_material == null)
+            return;
+        Texture? mask = _material.GetTexture(PaintMaskProperty);
+        if (mask != null && mask.wrapMode != TextureWrapMode.Repeat)
+            mask.wrapMode = TextureWrapMode.Repeat;
+    }
+
+    private static readonly int PaintMaskProperty = Shader.PropertyToID("_ClearedMaskTex");
+
+    public void OnVanillaRenderMeshRebuilt()
+    {
+        if (_heights == null)
+            return;
+        bool hadPaint = _paintColors != null;
+        RefreshPaintColors();
+        SyncPaintMaskWrapMode();
+        if (_paintColors == null || hadPaint || Root == null || _swapPending)
+            return;
+        ForceRemeshAll();
+    }
+
     private float SampleWorldHeight(int gx, int gz, int n, Vector3 hp)
     {
         int wx = gx - 1, wz = gz - 1;
@@ -202,15 +383,34 @@ public class VoxelZone
         return Hmap.m_heights[Mathf.Clamp(wz, 0, n - 1) * n + Mathf.Clamp(wx, 0, n - 1)] + hp.y;
     }
 
-    // no carve touched this cell - at zone borders the mesher can snap its verts onto the
-    // real heightmap surface, carved cells it can't
+    public bool TryVanillaSurfaceHeight(float worldX, float worldZ, out float height)
+    {
+        height = 0f;
+        if (_heights == null)
+            return false;
+        float fx = (worldX - Origin.x) / HorizontalSpacing;
+        float fz = (worldZ - Origin.z) / HorizontalSpacing;
+        int gx = Mathf.Clamp(Mathf.FloorToInt(fx), 0, NX - 2);
+        int gz = Mathf.Clamp(Mathf.FloorToInt(fz), 0, NZ - 2);
+        float tx = Mathf.Clamp01(fx - gx), tz = Mathf.Clamp01(fz - gz);
+        float h00 = H(gx, gz);
+        float h10 = H(gx + 1, gz);
+        float h01 = H(gx, gz + 1);
+        float h11 = H(gx + 1, gz + 1);
+        height = tx + tz <= 1f
+            ? h00 + tx * (h10 - h00) + tz * (h01 - h00)
+            : h11 + (1f - tx) * (h01 - h11) + (1f - tz) * (h10 - h11);
+        return true;
+    }
+
+    // uncarved cells can snap to the real heightmap surface; carved ones can't
     public bool IsPristineCell(int cx, int cy, int cz)
     {
         for (int dz = 0; dz <= 1; ++dz)
         {
             for (int dx = 0; dx <= 1; ++dx)
             {
-                float h = _heights[(cz + dz) * NX + cx + dx];
+                float h = H(cx + dx, cz + dz);
                 for (int dy = 0; dy <= 1; ++dy)
                 {
                     float expected = Mathf.Clamp(h - (Origin.y + (cy + dy) * VerticalSpacing), -DensityRange, DensityRange);
@@ -261,19 +461,18 @@ public class VoxelZone
     {
         if (Hmap == null || Hmap.m_heights == null || Hmap.m_heights.Count == 0)
             return;
-        // every ZDO write (my own carve saves included) pokes the heightmap and lands here,
-        // so only rebuild the geometry when the heights actually changed
+        // every ZDO write lands here - only rebuild geometry when heights actually changed
         int checksum = ComputeHeightsChecksum();
         if (checksum == _heightsChecksum)
         {
-            // heights are identical but Regenerate() still ran, so this was a paint-only change
-            // (vanilla path/paved/cultivated, or a mod's custom paint) - repaint without touching
-            // geometry
+            // same heights but Regenerate() ran = paint-only change; repaint, don't remesh
             RefreshPaintColors();
             if (!_swapPending && Root != null)
                 ForceRemeshAll();
             return;
         }
+
+        VoxelWorld.DirtyNeighborRims(Hmap);
 
         if (!_swapPending && Root != null && TryIncrementalHeightsUpdate())
         {
@@ -281,6 +480,11 @@ public class VoxelZone
             return;
         }
 
+        ForceRebuild();
+    }
+
+    private void ForceRebuild()
+    {
         foreach (Chunk chunk in _chunks.Values)
             DestroyChunk(chunk);
         _chunks.Clear();
@@ -330,15 +534,18 @@ public class VoxelZone
         if (maxGX < minGX)
             return true; // paint only - shared material updates by itself
 
-        for (int gy = 0; gy < NY; ++gy)
+        if (Density != null)
         {
-            float y = Origin.y + gy * VerticalSpacing;
-            for (int gz = minGZ; gz <= maxGZ; ++gz)
+            for (int gy = 0; gy < NY; ++gy)
             {
-                int row = (gy * NZ + gz) * NX;
-                int hrow = gz * NX;
-                for (int gx = minGX; gx <= maxGX; ++gx)
-                    Density[row + gx] = Mathf.Clamp(_heights[hrow + gx] - y, -DensityRange, DensityRange);
+                float y = Origin.y + gy * VerticalSpacing;
+                for (int gz = minGZ; gz <= maxGZ; ++gz)
+                {
+                    int row = (gy * NZ + gz) * NX;
+                    int hrow = gz * NX;
+                    for (int gx = minGX; gx <= maxGX; ++gx)
+                        Density[row + gx] = Mathf.Clamp(_heights[hrow + gx] - y, -DensityRange, DensityRange);
+                }
             }
         }
 
@@ -347,9 +554,7 @@ public class VoxelZone
 
         UpdateColumnRanges(Mathf.Max(0, (minGX - 2) / ChunkSize), Mathf.Min(_chunksX - 1, (maxGX + 2) / ChunkSize), Mathf.Max(0, (minGZ - 2) / ChunkSize), Mathf.Min(_chunksZ - 1, (maxGZ + 2) / ChunkSize));
         MarkSampleRange(_dirty, minGX, 0, minGZ, maxGX, NY - 1, maxGZ);
-        RemeshDirty();
-        // vanilla raise lets the player ride the heightmap collider up; here the voxel mesh
-        // just rebuilds around them, so pop out anyone the new surface swallowed
+        // the voxel mesh rebuilds around the player, so pop out anyone the new surface swallowed
         Vector3 center = new(Origin.x + (minGX + maxGX) * 0.5f * HorizontalSpacing, maxChangedH, Origin.z + (minGZ + maxGZ) * 0.5f * HorizontalSpacing);
         float ex = (maxGX - minGX) * HorizontalSpacing, ez = (maxGZ - minGZ) * HorizontalSpacing;
         VoxelWorld.EjectBuried(center, 0.5f * Mathf.Sqrt(ex * ex + ez * ez) + 1f);
@@ -358,11 +563,100 @@ public class VoxelZone
 
     public bool ApplyOp(CarveOp op)
     {
-        if (!AppliedIds.Add(op.Id))
+        if (!AppliedKeys.Add(op.DedupKey))
             return false;
         Ops.Add(op);
+        if (OpFloorY(op) < Origin.y + GridFloorMargin)
+        {
+            ForceRebuild();
+            return true;
+        }
+
         CarveDensity(op, true);
         return true;
+    }
+
+    public void MeshOpNow(CarveOp op)
+    {
+        if (_heights == null || Root == null || _swapPending)
+            return;
+        if (!ComputeOpBounds(op, 0, NX - 1, 0, NZ - 1, ownedOnly: false,
+                out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ))
+            return;
+        _opChunks.Clear();
+        MarkSampleRange(_opChunks, minX, minY, minZ, maxX, maxY, maxZ);
+        foreach (Vector3Int key in _opChunks)
+        {
+            BuildChunkMesh(key);
+            _dirty.Remove(key);
+        }
+    }
+
+    public void MarkOpDirty(CarveOp op)
+    {
+        if (_heights == null || Root == null)
+            return;
+        if (!ComputeOpBounds(op, 0, NX - 1, 0, NZ - 1, ownedOnly: false,
+                out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ))
+            return;
+        MarkSampleRange(_carvedChunks, minX, minY, minZ, maxX, maxY, maxZ);
+        MarkSampleRange(_dirty, minX, minY, minZ, maxX, maxY, maxZ);
+    }
+
+    private void RefreshGhostRing()
+    {
+        if (_heights == null || Hmap == null || Hmap.m_heights == null)
+            return;
+        int n = Hmap.m_width + 1;
+        Vector3 hp = Hmap.transform.position;
+        bool changed = false;
+        for (int gz = 0; gz < NZ; ++gz)
+        {
+            for (int gx = 0; gx < NX; ++gx)
+            {
+                if (gx > 1 && gx < NX - 2 && gz > 1 && gz < NZ - 2)
+                    continue;
+                float h = SampleWorldHeight(gx, gz, n, hp);
+                int i = gz * NX + gx;
+                if (Mathf.Approximately(h, _heights[i]))
+                    continue;
+                _heights[i] = h;
+                changed = true;
+                if (Density == null)
+                    continue;
+                for (int gy = 0; gy < NY; ++gy)
+                    Density[(gy * NZ + gz) * NX + gx] = Mathf.Clamp(h - (Origin.y + gy * VerticalSpacing), -DensityRange, DensityRange);
+            }
+        }
+
+        if (!changed)
+            return;
+        foreach (CarveOp op in Ops)
+        {
+            ApplyOpDensity(op, 0, 1, 0, NZ - 1, false, out _, out _, out _, out _, out _, out _);
+            ApplyOpDensity(op, NX - 2, NX - 1, 0, NZ - 1, false, out _, out _, out _, out _, out _, out _);
+            ApplyOpDensity(op, 0, NX - 1, 0, 1, false, out _, out _, out _, out _, out _, out _);
+            ApplyOpDensity(op, 0, NX - 1, NZ - 2, NZ - 1, false, out _, out _, out _, out _, out _, out _);
+        }
+
+        UpdateColumnRanges(0, _chunksX - 1, 0, _chunksZ - 1);
+        MarkRimDirty();
+    }
+
+    public void MarkRimDirty()
+    {
+        if (_heights == null || Root == null)
+            return;
+        for (int ky = 0; ky < _chunksY; ++ky)
+        {
+            for (int k = 0; k < _chunksX; ++k)
+            {
+                _dirty.Add(new Vector3Int(_chunksX - 1, ky, k));
+                _dirty.Add(new Vector3Int(0, ky, k));
+                _dirty.Add(new Vector3Int(k, ky, _chunksZ - 1));
+                _dirty.Add(new Vector3Int(k, ky, 0));
+            }
+        }
     }
 
     public bool WouldChange(CarveOp op)
@@ -372,9 +666,10 @@ public class VoxelZone
 
     private void CarveDensity(CarveOp op, bool markDirty)
     {
-        ApplyOpDensity(op, 0, NX - 1, 0, NZ - 1, false,
-            out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ);
-        if (minX > maxX)
+        ApplyOpDensity(op, 0, NX - 1, 0, NZ - 1, false, out _, out _, out _, out _, out _, out _);
+
+        if (!ComputeOpBounds(op, 0, NX - 1, 0, NZ - 1, ownedOnly: false,
+                out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ))
             return;
         // modified chunks can never be skipped as uniform, even on rebuild replay
         MarkSampleRange(_carvedChunks, minX, minY, minZ, maxX, maxY, maxZ);
@@ -382,19 +677,37 @@ public class VoxelZone
             MarkSampleRange(_dirty, minX, minY, minZ, maxX, maxY, maxZ);
     }
 
-    // Writes are restricted to columns [colMin..colMax] (incremental rebuilds use that).
-    // Returns true when the op visibly changes the surface.
-    private bool ApplyOpDensity(CarveOp op, int colMinX, int colMaxX, int colMinZ, int colMaxZ, bool dryRun,
+    private bool ComputeOpBounds(CarveOp op, int colMinX, int colMaxX, int colMinZ, int colMaxZ, bool ownedOnly,
         out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ)
     {
         float r = op.Radius;
         float extentXZ = r;
-        // plane ops need PrepareFloorColumns for their per-column targets - Raise included,
-        // or it reads the previous op's stale targets and silently no-ops
         bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
         float extentY = planeOp ? PlaneOpBand : r;
         if (op.Type == (byte)VoxelOpType.Raise)
             extentY = Mathf.Max(extentY, op.Depth + 1.5f); // modded pieces can raise more per swing than the band
+        if (op.Type == (byte)VoxelOpType.Scoop)
+            extentXZ = extentY = Mathf.Max(r, op.Depth);
+
+        int loX = ownedOnly ? OwnedLo : 0, hiX = ownedOnly ? _ownedHiX : NX - 1;
+        int loZ = ownedOnly ? OwnedLo : 0, hiZ = ownedOnly ? _ownedHiZ : NZ - 1;
+        Vector3 local = op.Point - Origin;
+        minX = Mathf.Max(Mathf.Max(colMinX, loX), Mathf.FloorToInt((local.x - extentXZ) / HorizontalSpacing) - 1);
+        maxX = Mathf.Min(Mathf.Min(colMaxX, hiX), Mathf.CeilToInt((local.x + extentXZ) / HorizontalSpacing) + 1);
+        minY = Mathf.Max(op.Type == (byte)VoxelOpType.Fill ? 0 : 2, Mathf.FloorToInt((local.y - extentY) / VerticalSpacing) - 1);
+        maxY = Mathf.Min(NY - 1, Mathf.CeilToInt((local.y + extentY) / VerticalSpacing) + 1);
+        minZ = Mathf.Max(Mathf.Max(colMinZ, loZ), Mathf.FloorToInt((local.z - extentXZ) / HorizontalSpacing) - 1);
+        maxZ = Mathf.Min(Mathf.Min(colMaxZ, hiZ), Mathf.CeilToInt((local.z + extentXZ) / HorizontalSpacing) + 1);
+        return minX <= maxX && minY <= maxY && minZ <= maxZ;
+    }
+
+    // writes restricted to [colMin..colMax]; returns true when the surface visibly changes
+    private bool ApplyOpDensity(CarveOp op, int colMinX, int colMaxX, int colMinZ, int colMaxZ, bool dryRun,
+        out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ)
+    {
+        float r = op.Radius;
+        // Raise included, or it reads the previous op's stale per-column targets and no-ops
+        bool planeOp = op.Type is (byte)VoxelOpType.Flatten or (byte)VoxelOpType.Smooth or (byte)VoxelOpType.Raise;
         Vector3 scoopDir = Vector3.down, scoopU = Vector3.right, scoopV = Vector3.forward;
         if (op.Type == (byte)VoxelOpType.Scoop)
         {
@@ -404,17 +717,10 @@ public class VoxelZone
                 scoopU = Vector3.Cross(scoopDir, Vector3.forward);
             scoopU.Normalize();
             scoopV = Vector3.Cross(scoopDir, scoopU);
-            extentXZ = extentY = Mathf.Max(r, op.Depth);
         }
 
-        Vector3 local = op.Point - Origin;
-        minX = Mathf.Max(Mathf.Max(colMinX, 0), Mathf.FloorToInt((local.x - extentXZ) / HorizontalSpacing) - 1);
-        maxX = Mathf.Min(Mathf.Min(colMaxX, NX - 1), Mathf.CeilToInt((local.x + extentXZ) / HorizontalSpacing) + 1);
-        minY = Mathf.Max(op.Type == (byte)VoxelOpType.Fill ? 0 : 2, Mathf.FloorToInt((local.y - extentY) / VerticalSpacing) - 1);
-        maxY = Mathf.Min(NY - 1, Mathf.CeilToInt((local.y + extentY) / VerticalSpacing) + 1);
-        minZ = Mathf.Max(Mathf.Max(colMinZ, 0), Mathf.FloorToInt((local.z - extentXZ) / HorizontalSpacing) - 1);
-        maxZ = Mathf.Min(Mathf.Min(colMaxZ, NZ - 1), Mathf.CeilToInt((local.z + extentXZ) / HorizontalSpacing) + 1);
-        if (minX > maxX || minY > maxY || minZ > maxZ)
+        if (!ComputeOpBounds(op, colMinX, colMaxX, colMinZ, colMaxZ, ownedOnly: true,
+                out minX, out minY, out minZ, out maxX, out maxY, out maxZ))
         {
             maxX = minX - 1;
             return false;
@@ -438,7 +744,7 @@ public class VoxelZone
                 {
                     float x = Origin.x + gx * HorizontalSpacing;
                     int idx = row + gx;
-                    float d = Density[idx];
+                    float d = Owned(gx, gy, gz);
                     float newD = d;
                     switch ((VoxelOpType)op.Type)
                     {
@@ -469,8 +775,7 @@ public class VoxelZone
                             }
                             else if (y <= _smoothFloors[col] + 1f && t < d)
                             {
-                                // only cut between the plane and the old floor (NaN floor
-                                // compares false) - leveling must not eat low ceilings
+                                // only cut between plane and old floor (NaN compares false) - don't eat low ceilings
                                 newD = t;
                             }
 
@@ -494,8 +799,7 @@ public class VoxelZone
                             float t = Vector3.Dot(rel, scoopDir);
                             Vector3 perp = rel - t * scoopDir;
                             float sd;
-                            // scale by the dominant axis, NOT min(depth, r) - that bound thinned
-                            // the rock in a wide shell and spam-dug shafts eventually tore open
+                            // scale by the dominant axis - min(depth, r) thinned rock and let shafts tear open
                             if (op.Shape == (byte)VoxelOpShape.Cube)
                             {
                                 float u = Mathf.Abs(Vector3.Dot(perp, scoopU));
@@ -528,8 +832,7 @@ public class VoxelZone
                             }
                             else if (y <= _smoothFloors[col] + 1f && target - y < d)
                             {
-                                // only clear between old and new floor - never carve into
-                                // ceilings the way flatten does
+                                // only clear between old and new floor - never carve into ceilings
                                 newD = target - y;
                             }
 
@@ -544,14 +847,14 @@ public class VoxelZone
                         flipped = true;
                     if (dryRun)
                     {
-                        // a carve only "changed" something if a sample flipped to air; fills
-                        // count any write
+                        // a carve changes something only if a sample flipped to air; fills count any write
                         if (!isCarve || flipped)
                             return true;
                         continue;
                     }
 
-                    Density[idx] = newD;
+                    EnsureDensity();
+                    Density![idx] = newD;
                 }
             }
         }
@@ -562,8 +865,7 @@ public class VoxelZone
     private static float[] _smoothTargets = [];
     private static float[] _smoothFloors = [];
 
-    // Per column: floor crossing nearest the op plane, blended toward it with smoothstep
-    // falloff. NaN = outside radius or no floor - keeps smooth the hell off tunnel walls.
+    // per column: floor crossing nearest the plane, smoothstep falloff; NaN = skip
     private void PrepareFloorColumns(CarveOp op, int minX, int maxX, int minZ, int maxZ, int minY, int maxY)
     {
         int w = maxX - minX + 1;
@@ -687,18 +989,7 @@ public class VoxelZone
             _dirty.Add(new Vector3Int(kx, ky, kz));
     }
 
-    public void RemeshDirty()
-    {
-        if (_swapPending)
-            return; // initial build in progress, the pump will pick these up
-        RemeshNow();
-    }
-
-    public void ForceRemeshAll()
-    {
-        MarkAllDirty();
-        RemeshDirty();
-    }
+    public void ForceRemeshAll() => MarkAllDirty();
 
     private void RemeshNow()
     {
@@ -709,32 +1000,62 @@ public class VoxelZone
         _dirty.Clear();
     }
 
+    private static bool PumpBudgetSpent()
+    {
+        if (_pumpFrame != Time.frameCount)
+        {
+            _pumpFrame = Time.frameCount;
+            PumpWatch.Restart();
+            return false;
+        }
+
+        return PumpWatch.ElapsedMilliseconds >= PumpBudgetMs;
+    }
+
+    private static double _worstChunkMs;
+    private static float _nextChunkReport;
+
+    private static void NoteChunkTime(double ms)
+    {
+        if (ms > _worstChunkMs)
+            _worstChunkMs = ms;
+        if (_worstChunkMs <= PumpBudgetMs * 2 || Time.unscaledTime < _nextChunkReport)
+            return;
+        _nextChunkReport = Time.unscaledTime + 5f;
+        HearthBelowPlugin.HearthBelowLogger.LogInfo(
+            $"Meshing overrun: slowest single chunk took {_worstChunkMs:F1} ms against a {PumpBudgetMs} ms frame budget.");
+        _worstChunkMs = 0.0;
+    }
+
     public void Pump()
     {
         if (Root == null)
             return;
-        if (_dirty.Count > 0)
+        if (_dirty.Count > 0 && !PumpBudgetSpent())
         {
-            PumpWatch.Restart();
+            long start = Stopwatch.GetTimestamp();
             _pumpList.Clear();
             _pumpList.AddRange(_dirty);
             foreach (Vector3Int key in _pumpList)
             {
+                long chunkStart = Stopwatch.GetTimestamp();
                 BuildChunkMesh(key);
                 _dirty.Remove(key);
-                if (PumpWatch.ElapsedMilliseconds >= PumpBudgetMs)
+                NoteChunkTime((Stopwatch.GetTimestamp() - chunkStart) * 1000.0 / Stopwatch.Frequency);
+                if (PumpBudgetSpent())
                     break;
             }
 
             if (_swapPending)
             {
-                _meshTicks += PumpWatch.ElapsedTicks;
+                _meshTicks += Stopwatch.GetTimestamp() - start;
                 ++_meshFrames;
             }
         }
 
         if (!_swapPending || _dirty.Count != 0) return;
         _swapPending = false;
+        if (Root != null) Root.SetActive(true);
         if (Hmap.m_meshRenderer != null) Hmap.m_meshRenderer.enabled = false;
         if (Hmap.m_collider != null) Hmap.m_collider.enabled = false;
         UnfreezeLooseBodies();
@@ -765,7 +1086,7 @@ public class VoxelZone
             }
         }
 
-        bool has = SurfaceNets.Build(this, sMin, sMax,
+        bool has = SurfaceNets.Build(this, sMin, sMax, !_carvedChunks.Contains(key),
             out List<Vector3> verts, out List<Vector3> normals, out List<Color32> colors, out List<Vector2> uvs, out List<int> tris);
 
         _chunks.TryGetValue(key, out Chunk? existing);
@@ -787,16 +1108,35 @@ public class VoxelZone
             MeshRenderer mr = go.AddComponent<MeshRenderer>();
             if (_material != null)
                 mr.sharedMaterial = _material;
-            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.TwoSided;
+            mr.shadowCastingMode = _shadowMode;
+            mr.receiveShadows = _receiveShadows;
+            mr.lightProbeUsage = _lightProbes;
+            mr.reflectionProbeUsage = _reflectionProbes;
             existing = new Chunk { Go = go, Collider = Hmap.gameObject.AddComponent<MeshCollider>() };
             _chunks[key] = existing;
         }
 
-        // heightmap-local space so the same mesh drives the renderer child AND the collider
-        // on the heightmap's GameObject
+        // heightmap-local space so one mesh drives both the renderer child and the collider
         Vector3 offset = Origin - Hmap.transform.position;
         for (int i = 0; i < verts.Count; ++i)
             verts[i] += offset;
+
+        bool onZoneEdge = key.x == 0 || key.z == 0 || key.x == _chunksX - 1 || key.z == _chunksZ - 1;
+        if (onZoneEdge)
+        {
+            float half = _zoneSize * 0.5f;
+            MeshRectClipper.Clip(verts, normals, uvs, colors, tris, -half, half, -half, half);
+            if (tris.Count == 0)
+            {
+                if (existing != null)
+                {
+                    DestroyChunk(existing);
+                    _chunks.Remove(key);
+                }
+
+                return;
+            }
+        }
 
         MeshFilter mf = existing.Go.GetComponent<MeshFilter>();
         Mesh? old = mf.sharedMesh;
@@ -806,11 +1146,94 @@ public class VoxelZone
         mesh.SetColors(colors);
         mesh.SetUVs(0, uvs);
         mesh.SetTriangles(tris, 0);
+        if (_needTangents)
+            SetTangents(mesh, uvs);
         mesh.RecalculateBounds();
         mf.sharedMesh = mesh;
         existing.Collider.sharedMesh = mesh;
         if (old != null)
             Object.Destroy(old);
+    }
+
+    private void SetTangents(Mesh mesh, List<Vector2> uvs)
+    {
+        Vector4[]? src = _vanillaTangents;
+        if (src == null)
+            return;
+        int width = Hmap.m_width;
+        int n = width + 1;
+        TangentScratch.Clear();
+        for (int i = 0; i < uvs.Count; ++i)
+        {
+            float gx = Mathf.Clamp(uvs[i].x * width, 0f, width);
+            float gy = Mathf.Clamp(uvs[i].y * width, 0f, width);
+            int x0 = Mathf.Min((int)gx, width - 1);
+            int y0 = Mathf.Min((int)gy, width - 1);
+            float tx = gx - x0, ty = gy - y0;
+            Vector4 t00 = src[y0 * n + x0];
+            Vector4 t10 = src[y0 * n + x0 + 1];
+            Vector4 t01 = src[(y0 + 1) * n + x0];
+            Vector4 t11 = src[(y0 + 1) * n + x0 + 1];
+            Vector4 t = Vector4.Lerp(Vector4.Lerp(t00, t10, tx), Vector4.Lerp(t01, t11, tx), ty);
+            Vector3 dir = new Vector3(t.x, t.y, t.z);
+            dir = dir.sqrMagnitude > 1e-8f ? dir.normalized : Vector3.right;
+            TangentScratch.Add(new Vector4(dir.x, dir.y, dir.z, t00.w >= 0f ? 1f : -1f));
+        }
+
+        mesh.SetTangents(TangentScratch);
+    }
+
+    public void SetChunksVisible(bool visible)
+    {
+        foreach (Chunk chunk in _chunks.Values)
+        {
+            if (chunk.Go == null)
+                continue;
+            MeshRenderer mr = chunk.Go.GetComponent<MeshRenderer>();
+            if (mr != null)
+                mr.enabled = visible;
+        }
+    }
+
+    public string DebugSurfaceInfo()
+    {
+        string paint = _paintColors == null
+            ? "FALLBACK GetBiomeColor  <-- differs from neighbours that have real paint"
+            : $"vanilla render mesh ({_paintColors.Length} colours)";
+        int matId = _material == null ? 0 : _material.GetInstanceID();
+        Vector3 centre = new(_zoneMinX + _zoneSize * 0.5f, 0f, _zoneMinZ + _zoneSize * 0.5f);
+        GetSurfaceAttributes(centre, out Vector2 uv, out Color32 c);
+        GetSurfaceAttributes(new Vector3(_zoneMinX + 0.5f, 0f, _zoneMinZ + 0.5f), out Vector2 uvC, out Color32 cc);
+        return $"  paint source: {paint}\n"
+               + $"  material instance id: {matId} (must differ per zone)\n"
+               + $"  centre uv=({uv.x:F4},{uv.y:F4}) colour=({c.r},{c.g},{c.b},{c.a})\n"
+               + $"  corner uv=({uvC.x:F4},{uvC.y:F4}) colour=({cc.r},{cc.g},{cc.b},{cc.a})";
+    }
+
+    public MeshRenderer? DebugFirstChunkRenderer()
+    {
+        foreach (Chunk chunk in _chunks.Values)
+        {
+            if (chunk.Go == null)
+                continue;
+            MeshRenderer mr = chunk.Go.GetComponent<MeshRenderer>();
+            if (mr != null)
+                return mr;
+        }
+
+        return null;
+    }
+
+    public IEnumerable<Mesh> DebugChunkMeshes()
+    {
+        foreach (Chunk chunk in _chunks.Values)
+        {
+            if (chunk.Go == null)
+                continue;
+            MeshFilter mf = chunk.Go.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+                yield return mf.sharedMesh;
+        }
     }
 
     public bool SampleSolid(Vector3 world)
@@ -830,10 +1253,11 @@ public class VoxelZone
 
     public void GetSurfaceAttributes(Vector3 world, out Vector2 uv, out Color32 color)
     {
-        float u = Mathf.Clamp01((world.x - _zoneMinX) / _zoneSize);
-        float v = Mathf.Clamp01((world.z - _zoneMinZ) / _zoneSize);
-        uv = new Vector2(u, v);
+        float u = (world.x - _zoneMinX) / _zoneSize;
+        float v = (world.z - _zoneMinZ) / _zoneSize;
         color = SamplePaintColor(u, v);
+
+        uv = new Vector2((world.x + _zoneSize * 0.5f) / _zoneSize, (world.z + _zoneSize * 0.5f) / _zoneSize);
     }
 
     private Color32 SamplePaintColor(float u, float v)
@@ -855,8 +1279,7 @@ public class VoxelZone
         return Color32.Lerp(Color32.Lerp(c00, c10, tx), Color32.Lerp(c01, c11, tx), ty);
     }
 
-    // No floor until the initial mesh is in - pin loose bodies kinematic so they don't fall out
-    // the bottom of the grid. Characters excluded: Character_CustomFixedUpdate_Patch pins those.
+    // no floor yet - pin loose bodies kinematic; characters are pinned by their own patch
     private void FreezeLooseBodies()
     {
         float gridH = (NY - 1) * VerticalSpacing;

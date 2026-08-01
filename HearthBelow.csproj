@@ -106,6 +106,9 @@
         <Reference Include="UnityEngine.PhysicsModule">
             <HintPath>$(CorlibPath)\UnityEngine.PhysicsModule.dll</HintPath>
         </Reference>
+        <Reference Include="UnityEngine.ParticleSystemModule">
+            <HintPath>$(CorlibPath)\UnityEngine.ParticleSystemModule.dll</HintPath>
+        </Reference>
         <Reference Include="Splatform">
             <HintPath>$(GamePath)\valheim_Data\Managed\Splatform.dll</HintPath>
         </Reference>
@@ -139,6 +142,8 @@
         <Compile Include="VersionHandshake.cs"/>
         <Compile Include="VoxelMagic\CarveOp.cs" />
         <Compile Include="VoxelMagic\DistantLod.cs" />
+        <Compile Include="VoxelMagic\MeshRectClipper.cs" />
+        <Compile Include="VoxelMagic\SeamDiagnostics.cs" />
         <Compile Include="VoxelMagic\SurfaceNets.cs" />
         <Compile Include="VoxelMagic\VoxelWorld.cs" />
         <Compile Include="VoxelMagic\VoxelZone.cs" />

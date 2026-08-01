@@ -13,8 +13,7 @@ public static class VoxelWorld
     private const float MinRaiseDelta = 0.1f, MaxRaiseDelta = 8f;
     private const float MaxRaisePower = 8f;
 
-    // gap under the heightmap that counts as carved ground; clears the mesher's worst-case
-    // drift on uncarved slopes (~10cm + 5cm border sink)
+    // gap under the heightmap that counts as carved ground; covers worst-case mesher drift
     private const float CarvedGroundGap = 0.35f;
 
     // PollComp retries per comp before giving up on a heightmap that never gets ready (~10s)
@@ -40,6 +39,7 @@ public static class VoxelWorld
             return null;
         Zones[hmap] = zone;
         HearthBelowPlugin.HearthBelowLogger.LogDebug($"Voxelized zone at {hmap.transform.position}: grid {zone.NX}x{zone.NY}x{zone.NZ}, data built in {ElapsedMs(start):F1} ms");
+        NotifyNeighbors(hmap);
         return zone;
     }
 
@@ -52,8 +52,7 @@ public static class VoxelWorld
         zone.Dispose(restoreHeightmap);
         Zones.Remove(hmap);
         DistantLod.RefreshAt(hmap); // un-sink the LOD sheet over this zone
-        if (restoreHeightmap)
-            NotifyNeighbors(hmap); // neighbors must extend their border strips over this zone again
+        NotifyNeighbors(hmap);
     }
 
     public static VoxelZone? GetActiveZoneAt(Vector3 pos)
@@ -64,19 +63,123 @@ public static class VoxelWorld
 
     public static bool IsVoxelizedAt(Vector3 pos) => GetActiveZoneAt(pos) != null;
 
+    public static bool IsCarvedZoneAt(Vector3 pos)
+    {
+        VoxelZone? zone = GetActiveZoneAt(pos);
+        return zone is { HasCarvedGeometry: true };
+    }
+
     public static void NotifyNeighbors(Heightmap hmap)
     {
         float size = hmap.m_width * hmap.m_scale;
         Vector3 c = hmap.transform.position;
-        GetZone(Heightmap.FindHeightmap(c + new Vector3(size, 0f, 0f)))?.OnNeighborChanged();
-        GetZone(Heightmap.FindHeightmap(c - new Vector3(size, 0f, 0f)))?.OnNeighborChanged();
-        GetZone(Heightmap.FindHeightmap(c + new Vector3(0f, 0f, size)))?.OnNeighborChanged();
-        GetZone(Heightmap.FindHeightmap(c - new Vector3(0f, 0f, size)))?.OnNeighborChanged();
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                if (dx == 0 && dz == 0)
+                    continue;
+                GetZone(Heightmap.FindHeightmap(c + new Vector3(dx * size, 0f, dz * size)))?.OnNeighborChanged();
+            }
+        }
+    }
+
+    public static void DirtyNeighborsForOp(Heightmap hmap, CarveOp op)
+    {
+        ForEachNeighborZone(hmap, zone => zone.MarkOpDirty(op));
+    }
+
+    public static void MeshNeighborsForOpNow(Heightmap hmap, CarveOp op)
+    {
+        ForEachNeighborZone(hmap, zone => zone.MeshOpNow(op));
+    }
+
+    public static void DirtyNeighborRims(Heightmap hmap)
+    {
+        ForEachNeighborZone(hmap, zone => zone.MarkRimDirty());
+    }
+
+    private static void ForEachNeighborZone(Heightmap hmap, System.Action<VoxelZone> action)
+    {
+        float size = hmap.m_width * hmap.m_scale;
+        Vector3 c = hmap.transform.position;
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                if (dx == 0 && dz == 0)
+                    continue;
+                VoxelZone? zone = GetZone(Heightmap.FindHeightmap(c + new Vector3(dx * size, 0f, dz * size)));
+                if (zone != null)
+                    action(zone);
+            }
+        }
+    }
+
+    public static void SetDebugView(string mode, Vector3 center, float radius)
+    {
+        bool voxel = mode is "all" or "voxel";
+        bool vanilla = mode is "all" or "vanilla";
+        bool lod = mode is "all" or "lod";
+
+        TmpHmaps.Clear();
+        Heightmap.FindHeightmap(center, radius, TmpHmaps);
+        foreach (Heightmap hmap in TmpHmaps)
+        {
+            VoxelZone? zone = GetZone(hmap);
+            zone?.SetChunksVisible(voxel);
+            if (hmap.m_meshRenderer == null)
+                continue;
+            bool vanillaDefault = zone is not { IsActive: true };
+            hmap.m_meshRenderer.enabled = mode == "all" ? vanillaDefault : vanilla;
+        }
+
+        DistantLod.SetVisible(lod);
     }
 
     public static void OnHeightmapDestroyed(Heightmap hmap) => RemoveZone(hmap, false);
 
-    public static void OnHeightmapRegenerated(Heightmap hmap) => GetZone(hmap)?.Rebuild();
+    public static void OnHeightmapRegenerated(Heightmap hmap)
+    {
+        if (hmap == null || hmap.IsDistantLod)
+            return;
+        GetZone(hmap)?.Rebuild();
+        EnsureZone(hmap);
+        NotifyNeighbors(hmap);
+    }
+
+    private static readonly List<Heightmap> PumpList = [];
+
+    public static void PumpAllZones()
+    {
+        if (Zones.Count == 0)
+            return;
+        PumpList.Clear();
+        foreach (Heightmap hmap in Zones.Keys)
+            PumpList.Add(hmap);
+
+        Player? player = Player.m_localPlayer;
+        Vector3 eye = player != null ? player.transform.position : Vector3.zero;
+        bool haveEye = player != null;
+        PumpList.Sort((a, b) =>
+        {
+            bool pa = a != null && Zones.TryGetValue(a, out VoxelZone? za) && za.IsSwapPending;
+            bool pb = b != null && Zones.TryGetValue(b, out VoxelZone? zb) && zb.IsSwapPending;
+            if (pa != pb)
+                return pa ? -1 : 1;
+            if (!haveEye)
+                return 0;
+            float da = a == null ? float.MaxValue : Utils.DistanceSqr(a.transform.position, eye);
+            float db = b == null ? float.MaxValue : Utils.DistanceSqr(b.transform.position, eye);
+            return da.CompareTo(db);
+        });
+
+        foreach (Heightmap hmap in PumpList)
+        {
+            if (hmap != null && Zones.TryGetValue(hmap, out VoxelZone? zone))
+                zone.Pump();
+        }
+    }
 
     public static void ForgetComp(TerrainComp comp)
     {
@@ -87,7 +190,7 @@ public static class VoxelWorld
     public static bool SuppressGroundClamp(Vector3 pos)
     {
         VoxelZone? zone = GetZone(Heightmap.FindHeightmap(pos));
-        return zone != null && pos.y > zone.Origin.y + 1f;
+        return zone is { HasCarvedGeometry: true } && pos.y > zone.Origin.y + 1f;
     }
 
     public static bool HasSavedOpsAt(Vector3 pos)
@@ -114,6 +217,7 @@ public static class VoxelWorld
     // watches the ZDO DataRevision for unseen carve ops - both the zone-load path and live sync
     public static void PollComp(TerrainComp comp)
     {
+        DistantLod.FlushPending();
         ZNetView nview = comp.m_nview;
         if (nview == null || !nview.IsValid())
             return;
@@ -143,25 +247,31 @@ public static class VoxelWorld
         if (hmap == null)
             return false;
         byte[]? bytes = comp.m_nview.GetZDO().GetByteArray(CarveData.ZdoKey);
-        List<CarveOp>? ops = CarveData.Deserialize(bytes);
+        CarveDataState state = CarveData.Read(bytes, out List<CarveOp> ops);
         VoxelZone? zone = GetZone(hmap);
-        if (ops == null || ops.Count == 0)
+
+        if (state == CarveDataState.Unreadable)
+            return true;
+
+        if (ops.Count == 0)
         {
-            if (zone != null)
-                RemoveZone(hmap, true);
+            if (zone == null || zone.Ops.Count == 0)
+                return true;
+            RemoveZone(hmap, true);
+            EnsureZone(hmap);
             return true;
         }
 
         if (zone != null)
         {
             // a locally applied op vanished remotely? start over from a clean zone
-            HashSet<int> incoming = [];
+            HashSet<CarveOp.Key> incoming = [];
             foreach (CarveOp op in ops)
-                incoming.Add(op.Id);
+                incoming.Add(op.DedupKey);
             bool removed = false;
-            foreach (int id in zone.AppliedIds)
+            foreach (CarveOp.Key key in zone.AppliedKeys)
             {
-                if (incoming.Contains(id)) continue;
+                if (incoming.Contains(key)) continue;
                 removed = true;
                 break;
             }
@@ -188,7 +298,9 @@ public static class VoxelWorld
         }
 
         if (applied > 0)
-            zone.RemeshDirty();
+        {
+            DirtyNeighborRims(hmap);
+        }
         if (applied > 1)
             HearthBelowPlugin.HearthBelowLogger.LogDebug($"Replayed {applied}/{ops.Count} saved dig op(s) for zone at {comp.transform.position} in {ElapsedMs(replayStart):F1} ms");
         return true;
@@ -196,8 +308,7 @@ public static class VoxelWorld
 
     public static bool CarveAt(Vector3 point, float radius) => CarveAt(point, radius, null);
 
-    // Gradual mode + digDir = shallow oriented scoop, otherwise full radius in one go. A finite
-    // toolDepthCap protects everything below surface-cap meters, leaving a flat floor.
+    // gradual + digDir = oriented scoop; a finite toolDepthCap leaves a flat floor
     public static bool CarveAt(Vector3 point, float radius, Vector3? digDir, bool quiet = false, float toolDepthCap = float.PositiveInfinity)
     {
         radius = Mathf.Clamp(radius, MinDigRadius, MaxDigRadius);
@@ -297,7 +408,7 @@ public static class VoxelWorld
         }, null);
     }
 
-    private static int NewOpId() => Random.Range(int.MinValue, int.MaxValue);
+    private static int NewOpId() => System.Guid.NewGuid().GetHashCode();
 
     private static byte ConfiguredShape()
     {
@@ -306,14 +417,14 @@ public static class VoxelWorld
     
     public static bool IsUndergroundAt(Vector3 pos)
     {
-        if (GetActiveZoneAt(pos) == null)
+        if (!IsCarvedZoneAt(pos))
             return false;
         return Heightmap.GetHeight(pos, out float height) && pos.y < height - 1f;
     }
 
     public static bool IsCarvedGroundAt(Vector3 pos)
     {
-        if (GetActiveZoneAt(pos) == null)
+        if (!IsCarvedZoneAt(pos))
             return false;
         return Heightmap.GetHeight(pos, out float height) && pos.y < height - CarvedGroundGap;
     }
@@ -323,12 +434,18 @@ public static class VoxelWorld
 
     public static bool IsInCaveAt(Vector3 pos, float minDepth = 1f)
     {
-        if (GetActiveZoneAt(pos) == null)
+        if (!IsCarvedZoneAt(pos))
             return false;
         if (!Heightmap.GetHeight(pos, out float surface) || pos.y > surface - Mathf.Max(1f, minDepth))
             return false;
         // cave ceilings face down, so an upward ray from chest height finds them
         return Physics.Raycast(pos + Vector3.up * 0.5f, Vector3.up, 200f, TerrainMask);
+    }
+
+    private static float WriteExtent(CarveOp op)
+    {
+        float reach = op.Type == (byte)VoxelOpType.Scoop ? Mathf.Max(op.Radius, op.Depth) : op.Radius;
+        return reach + 3f;
     }
 
     private static bool ApplyPlayerOp(CarveOp op, string? noEffectMessage)
@@ -338,7 +455,7 @@ public static class VoxelWorld
         if (Location.IsInsideNoBuildLocation(op.Point))
             return false;
         TmpHmaps.Clear();
-        Heightmap.FindHeightmap(op.Point, op.Radius + 1f, TmpHmaps);
+        Heightmap.FindHeightmap(op.Point, WriteExtent(op), TmpHmaps);
         if (TmpHmaps.Count == 0)
             return false;
         bool anyEffect = false;
@@ -381,14 +498,15 @@ public static class VoxelWorld
             return; // heightmap not ready; the op will still arrive via the ZDO data sync
         if (zone.ApplyOp(op))
         {
-            zone.RemeshDirty();
+            zone.MeshOpNow(op);
+            DirtyNeighborsForOp(hmap, op);
+            MeshNeighborsForOpNow(hmap, op);
             ClutterSystem.instance?.ResetGrass(op.Point, op.Radius + 2f);
             EjectCharacters(op);
         }
     }
 
-    // A fill materializes rock around the capsule and PhysX won't depenetrate a non-convex
-    // MeshCollider - congrats, you're entombed. Pop buried owned characters up to the surface.
+    // PhysX can't depenetrate a non-convex MeshCollider, so pop buried owned characters out
     private static void EjectCharacters(CarveOp op)
     {
         if (op.Type == (byte)VoxelOpType.Carve || op.Type == (byte)VoxelOpType.Scoop)
@@ -430,9 +548,10 @@ public static class VoxelWorld
     private static bool AppendAndSave(TerrainComp comp, CarveOp op)
     {
         ZDO zdo = comp.m_nview.GetZDO();
-        List<CarveOp> ops = CarveData.Deserialize(zdo.GetByteArray(CarveData.ZdoKey)) ?? [];
+        if (CarveData.Read(zdo.GetByteArray(CarveData.ZdoKey), out List<CarveOp> ops) == CarveDataState.Unreadable)
+            return false;
         foreach (CarveOp existing in ops)
-            if (existing.Id == op.Id)
+            if (existing.DedupKey.Equals(op.DedupKey))
                 return true;
         if (ops.Count >= HearthBelowPlugin.MaxOpsPerZone.Value)
         {
@@ -476,8 +595,7 @@ public static class VoxelWorld
         nview.GetZDO().Set(CarveData.ZdoKey, []);
     }
 
-    // Clears this zone AND the same ops from neighbors - border-straddling ops live on both
-    // sides, and leaving half behind makes the seam look like a landslide.
+    // clear neighbors too - border-straddling ops live on both sides
     public static void RequestClear(Heightmap hmap)
     {
         TerrainComp comp = TerrainComp.FindTerrainCompiler(hmap.transform.position);
@@ -487,10 +605,9 @@ public static class VoxelWorld
         if (nview == null || !nview.IsValid())
             return;
         HashSet<int> ids = [];
-        List<CarveOp>? ops = CarveData.Deserialize(nview.GetZDO().GetByteArray(CarveData.ZdoKey));
-        if (ops != null)
-            foreach (CarveOp op in ops)
-                ids.Add(op.Id);
+        CarveData.Read(nview.GetZDO().GetByteArray(CarveData.ZdoKey), out List<CarveOp> ops);
+        foreach (CarveOp op in ops)
+            ids.Add(op.Id);
         if (nview.IsOwner())
             nview.GetZDO().Set(CarveData.ZdoKey, []);
         else
@@ -534,8 +651,7 @@ public static class VoxelWorld
     private static void RemoveOps(TerrainComp comp, HashSet<int> ids)
     {
         ZDO zdo = comp.m_nview.GetZDO();
-        List<CarveOp>? ops = CarveData.Deserialize(zdo.GetByteArray(CarveData.ZdoKey));
-        if (ops == null)
+        if (CarveData.Read(zdo.GetByteArray(CarveData.ZdoKey), out List<CarveOp> ops) != CarveDataState.Ok)
             return;
         if (ops.RemoveAll(op => ids.Contains(op.Id)) == 0)
             return;
@@ -564,6 +680,17 @@ public static class VoxelWorld
         if (hmap == null)
             return "No heightmap at this position.";
         VoxelZone? zone = GetZone(hmap);
-        return zone == null ? $"Zone not voxelized. {Zones.Count} zone(s) voxelized in total." : $"Zone voxelized: {zone.Ops.Count} carve op(s), grid {zone.NX}x{zone.NY}x{zone.NZ}. {Zones.Count} zone(s) voxelized in total.";
+        int pending = 0, dirty = 0;
+        foreach (VoxelZone z in Zones.Values)
+        {
+            if (!z.IsSwapPending) continue;
+            ++pending;
+            dirty += z.DirtyChunkCount;
+        }
+
+        string tail = $"{Zones.Count} zone(s) voxelized in total, {pending} still showing vanilla ({dirty} chunk(s) queued).";
+        return zone == null
+            ? $"Zone not voxelized. {tail}"
+            : $"Zone voxelized{(zone.IsSwapPending ? $" (STILL SHOWING VANILLA, {zone.DirtyChunkCount} chunk(s) queued)" : "")}: {zone.Ops.Count} carve op(s), grid {zone.NX}x{zone.NY}x{zone.NZ}. {tail}";
     }
 }

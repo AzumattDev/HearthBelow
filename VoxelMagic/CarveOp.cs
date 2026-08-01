@@ -19,11 +19,41 @@ public enum VoxelOpShape : byte
     Cube = 1
 }
 
-// Idempotent (dedup by id), applied in ZDO order. Shape is baked in - clients with different
 // configs must still replay identical geometry.
 public struct CarveOp
 {
+    public readonly struct Key : System.IEquatable<Key>
+    {
+        private readonly int _id;
+        private readonly float _x, _y, _z;
+
+        public Key(int id, Vector3 point)
+        {
+            _id = id;
+            _x = point.x;
+            _y = point.y;
+            _z = point.z;
+        }
+
+        public bool Equals(Key other) => _id == other._id && _x == other._x && _y == other._y && _z == other._z;
+
+        public override bool Equals(object? obj) => obj is Key other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            int h = _id;
+            h = (h * 397) ^ _x.GetHashCode();
+            h = (h * 397) ^ _y.GetHashCode();
+            h = (h * 397) ^ _z.GetHashCode();
+            return h;
+        }
+    }
+
+    public Key DedupKey => new(Id, Point);
+
     public int Id;
+
+    public long Seq;
     public byte Type;
     public byte Shape;
     public Vector3 Point;
@@ -36,6 +66,7 @@ public struct CarveOp
     public void Write(ZPackage pkg)
     {
         pkg.Write(Id);
+        pkg.Write(Seq);
         pkg.Write(Type);
         pkg.Write(Shape);
         pkg.Write(Point);
@@ -60,6 +91,7 @@ public struct CarveOp
         CarveOp op = new()
         {
             Id = pkg.ReadInt(),
+            Seq = version >= 7 ? pkg.ReadLong() : 0L,
             Type = version >= 2 ? pkg.ReadByte() : (byte)VoxelOpType.Carve,
             Shape = version >= 3 ? pkg.ReadByte() : (byte)VoxelOpShape.Sphere,
             Point = pkg.ReadVector3(),
@@ -81,10 +113,18 @@ public struct CarveOp
     }
 }
 
+public enum CarveDataState
+{
+    Empty,
+    Ok,
+
+    Unreadable
+}
+
 // Per-zone op list compressed onto the TerrainComp ZDO - save persistence and client sync for free.
 public static class CarveData
 {
-    public const int Version = 6;
+    public const int Version = 7;
     public static readonly int ZdoKey = "HearthBelow_VoxelOps".GetStableHashCode();
 
     public static byte[] Serialize(List<CarveOp> ops)
@@ -97,30 +137,44 @@ public static class CarveData
         return Utils.Compress(pkg.GetArray());
     }
 
-    public static List<CarveOp>? Deserialize(byte[]? bytes)
+    private static readonly HashSet<int> WarnedPayloads = [];
+
+    public static CarveDataState Read(byte[]? bytes, out List<CarveOp> ops)
     {
+        ops = [];
         if (bytes == null || bytes.Length == 0)
-            return null;
+            return CarveDataState.Empty;
         try
         {
             ZPackage pkg = new(Utils.Decompress(bytes));
             int version = pkg.ReadInt();
             if (version > Version)
             {
-                HearthBelowPlugin.HearthBelowLogger.LogWarning($"Voxel data version {version} is newer than this mod supports, ignoring");
-                return null;
+                WarnOnce(bytes, $"Voxel data version {version} is newer than this build supports. "
+                                + "Leaving this zone's data untouched - digging here is disabled until you run a build that understands it.");
+                return CarveDataState.Unreadable;
             }
 
             int count = pkg.ReadInt();
-            List<CarveOp> ops = new(count);
+            List<CarveOp> read = new(count);
             for (int i = 0; i < count; ++i)
-                ops.Add(CarveOp.Read(pkg, version));
-            return ops;
+                read.Add(CarveOp.Read(pkg, version));
+            ops = read;
+            return CarveDataState.Ok;
         }
         catch (System.Exception e)
         {
-            HearthBelowPlugin.HearthBelowLogger.LogWarning($"Failed to parse voxel data: {e.Message}");
-            return null;
+            WarnOnce(bytes, $"Failed to parse voxel data ({e.Message}). Leaving this zone's data untouched.");
+            return CarveDataState.Unreadable;
         }
+    }
+
+    private static void WarnOnce(byte[] payload, string message)
+    {
+        int key = payload.Length;
+        for (int i = 0; i < payload.Length; i += 64)
+            key = key * 31 + payload[i];
+        if (WarnedPayloads.Add(key))
+            HearthBelowPlugin.HearthBelowLogger.LogWarning(message);
     }
 }

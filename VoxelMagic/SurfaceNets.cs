@@ -39,8 +39,11 @@ public static class SurfaceNets
         { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }
     };
 
-    public static bool Build(VoxelZone zone, Vector3Int sMin, Vector3Int sMax, out List<Vector3> verts, out List<Vector3> normals, out List<Color32> colors, out List<Vector2> uvs, out List<int> tris)
+    private static bool _allPristine;
+
+    public static bool Build(VoxelZone zone, Vector3Int sMin, Vector3Int sMax, bool allPristine, out List<Vector3> verts, out List<Vector3> normals, out List<Color32> colors, out List<Vector2> uvs, out List<int> tris)
     {
+        _allPristine = allPristine;
         verts = Verts;
         normals = Normals;
         colors = Colors;
@@ -96,16 +99,13 @@ public static class SurfaceNets
                     Vector3 p = AverageEdgeCrossing(d) + new Vector3(cx, cy, cz);
                     Vector3 local = new(p.x * zone.HorizontalSpacing, p.y * VoxelZone.VerticalSpacing, p.z * zone.HorizontalSpacing);
 
-                    // border verts drift off the heightmap on slopes and gaps kept opening on
-                    // hillsides - snap untouched cells onto the real surface instead
-                    if ((cx == 0 && !zone.NeighborVoxNX) || (cx == zone.NX - 2 && !zone.NeighborVoxPX) ||
-                        (cz == 0 && !zone.NeighborVoxNZ) || (cz == zone.NZ - 2 && !zone.NeighborVoxPZ))
-                    {
-                        if (zone.IsPristineCell(cx, cy, cz) && Heightmap.GetHeight(zone.Origin + local, out float wh))
-                            local.y = wh - zone.Origin.y - PristineBorderSink;
-                        else
-                            local.y -= CarvedBorderSink;
-                    }
+                    bool pristine = _allPristine || zone.IsPristineCell(cx, cy, cz);
+                    if (pristine && zone.TryVanillaSurfaceHeight(zone.Origin.x + local.x, zone.Origin.z + local.z, out float wh))
+                        local.y = wh - zone.Origin.y;
+
+                    if ((cx == 0 && !zone.HasNeighborNX) || (cx == zone.NX - 2 && !zone.HasNeighborPX) ||
+                        (cz == 0 && !zone.HasNeighborNZ) || (cz == zone.NZ - 2 && !zone.HasNeighborPZ))
+                        local.y -= pristine ? PristineBorderSink : CarvedBorderSink;
 
                     zone.GetSurfaceAttributes(zone.Origin + local, out Vector2 uv, out Color32 color);
                     _cellVerts[CellIndex(cx, cy, cz)] = Verts.Count;
@@ -149,8 +149,7 @@ public static class SurfaceNets
         Vector3 grad = new(gx / zone.HorizontalSpacing, gy / VoxelZone.VerticalSpacing, gz / zone.HorizontalSpacing);
         Vector3 normal = grad.sqrMagnitude > 1e-8f ? (-grad).normalized : Vector3.up;
 
-        // Valheim's trilight hands straight-down normals the near-black ground color - flat
-        // ceilings render as black slabs at night. Tilt them to shade like steep cave walls.
+        // tilt straight-down normals: vanilla trilight renders flat ceilings as black slabs
         if (normal.y < CeilingNormalY)
         {
             Vector3 flat = new(normal.x, 0f, normal.z);
@@ -166,18 +165,16 @@ public static class SurfaceNets
     // one quad per grid edge the surface crosses, wound to face the air side
     private static void EmitQuads(VoxelZone zone, Vector3Int sMin, Vector3Int sMax)
     {
-        // the zone owns edges at samples [1, NX-3]; edges on the max border line belong to the
-        // neighbor and only get rendered here when that neighbor isn't voxelized
-        int maxOwned = zone.NX - 3;
+        const int maxOwned = int.MaxValue - 1;
         for (int sy = sMin.y; sy < sMax.y; ++sy)
         {
             for (int sz = sMin.z; sz < sMax.z; ++sz)
             {
-                bool perpOkZ = sz <= maxOwned || (sz == maxOwned + 1 && !zone.NeighborVoxPZ);
+                bool perpOkZ = sz <= maxOwned || (sz == maxOwned + 1 && !zone.HasNeighborPZ);
                 bool alongOkZ = sz <= maxOwned;
                 for (int sx = sMin.x; sx < sMax.x; ++sx)
                 {
-                    bool perpOkX = sx <= maxOwned || (sx == maxOwned + 1 && !zone.NeighborVoxPX);
+                    bool perpOkX = sx <= maxOwned || (sx == maxOwned + 1 && !zone.HasNeighborPX);
                     if (!perpOkX && !perpOkZ)
                         continue;
                     bool alongOkX = sx <= maxOwned;

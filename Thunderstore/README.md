@@ -169,9 +169,10 @@ values with positive values above and below it, so overhangs and tunnels come fo
   back. Zones are meshed in 16×16×16 chunks and only the chunks that changed are remeshed,
   which is what keeps digging cheap.
 - **The distant terrain follows along.** Valheim draws far-away ground as a coarse heightmap
-  sheet that knows nothing about caves, which would otherwise show up as a wall or a sunken step
-  across a zone you've dug into. Dug zones are cut out of that sheet, so what you see at range
-  matches what you walk on.
+  sheet that knows nothing about caves, which would otherwise show up as a wall, a sunken step,
+  or a flat sheet hanging inside your tunnel. That sheet is cut away around dug zones near you
+  and restored once you leave, so caves look right from inside without punching holes in the
+  scenery at a distance.
 - **Persistence is replay.** The grid itself is never saved - that would be megabytes. Instead,
   each dig is stored as a tiny operation on the zone's TerrainComp ZDO (the same networked
   object vanilla uses for terrain edits), and the grid is rebuilt from heightmap + replayed ops

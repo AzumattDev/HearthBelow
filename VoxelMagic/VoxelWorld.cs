@@ -152,6 +152,7 @@ public static class VoxelWorld
 
     public static void PumpAllZones()
     {
+        DistantLod.Tick(); // before the guard: the last zone unloading still has to restore its LOD
         if (Zones.Count == 0)
             return;
         PumpList.Clear();
@@ -217,7 +218,6 @@ public static class VoxelWorld
     // watches the ZDO DataRevision for unseen carve ops - both the zone-load path and live sync
     public static void PollComp(TerrainComp comp)
     {
-        DistantLod.FlushPending();
         ZNetView nview = comp.m_nview;
         if (nview == null || !nview.IsValid())
             return;

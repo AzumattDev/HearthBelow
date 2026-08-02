@@ -17,7 +17,7 @@ namespace HearthBelow;
 public class HearthBelowPlugin : BaseUnityPlugin
 {
     internal const string ModName = "HearthBelow";
-    internal const string ModVersion = "0.3.3";
+    internal const string ModVersion = "0.3.4";
     internal const string Author = "Azumatt";
     private const string ModGUID = Author + "." + ModName;
     private static string ConfigFileName = ModGUID + ".cfg";

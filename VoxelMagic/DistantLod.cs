@@ -6,15 +6,20 @@ namespace HearthBelow.VoxelMagic;
 // TerrainLod ignores every edit, so inside a dug-out mountain it shows as a white walk-through
 public static class DistantLod
 {
+    private const float StripRange = 64f;
+
     private static readonly List<Heightmap> LodMaps = [];
 
     private static readonly HashSet<Heightmap> Pending = [];
-    private static int _lastFlushFrame = -1;
+    private static int _lastTickFrame = -1;
 
     private static readonly List<Vector3> StripVerts = [];
     private static readonly List<int> StripTris = [];
     private static readonly List<int> StripKept = [];
     private static readonly HashSet<Vector2Int> ActiveZones = [];
+    private static readonly HashSet<Vector2Int> Stripped = [];
+    private static readonly HashSet<Vector2Int> Scratch = [];
+    private static float _lastZoneSize;
 
     public static void Register(Heightmap lod)
     {
@@ -48,8 +53,11 @@ public static class DistantLod
     {
         if (zoneHmap == null)
             return;
-        Vector3 c = zoneHmap.transform.position;
-        float half = zoneHmap.m_width * zoneHmap.m_scale * 0.5f;
+        QueueOverlapping(zoneHmap.transform.position, zoneHmap.m_width * zoneHmap.m_scale * 0.5f);
+    }
+
+    private static void QueueOverlapping(Vector3 centre, float half)
+    {
         for (int i = LodMaps.Count - 1; i >= 0; --i)
         {
             Heightmap lod = LodMaps[i];
@@ -61,17 +69,82 @@ public static class DistantLod
 
             float lodHalf = lod.m_width * lod.m_scale * 0.5f;
             Vector3 lp = lod.transform.position;
-            if (Mathf.Abs(c.x - lp.x) > lodHalf + half || Mathf.Abs(c.z - lp.z) > lodHalf + half)
+            if (Mathf.Abs(centre.x - lp.x) > lodHalf + half || Mathf.Abs(centre.z - lp.z) > lodHalf + half)
                 continue;
             Pending.Add(lod);
         }
     }
 
-    public static void FlushPending()
+    public static void Tick()
     {
-        if (Pending.Count == 0 || _lastFlushFrame == Time.frameCount)
+        if (_lastTickFrame == Time.frameCount)
             return;
-        _lastFlushFrame = Time.frameCount;
+        _lastTickFrame = Time.frameCount;
+        RefreshEligibility();
+        FlushPending();
+    }
+
+    private static void RefreshEligibility()
+    {
+        if (Player.m_localPlayer == null)
+        {
+            Stripped.Clear();
+            return;
+        }
+
+        float zoneSize = CollectStrippable(Scratch);
+        if (zoneSize <= 0f)
+            zoneSize = _lastZoneSize;
+        if (zoneSize <= 0f || Scratch.SetEquals(Stripped))
+            return;
+
+        foreach (Vector2Int key in Scratch)
+        {
+            if (!Stripped.Contains(key))
+                QueueOverlapping(new Vector3(key.x * zoneSize, 0f, key.y * zoneSize), zoneSize * 0.5f);
+        }
+
+        foreach (Vector2Int key in Stripped)
+        {
+            if (!Scratch.Contains(key))
+                QueueOverlapping(new Vector3(key.x * zoneSize, 0f, key.y * zoneSize), zoneSize * 0.5f);
+        }
+
+        Stripped.Clear();
+        Stripped.UnionWith(Scratch);
+    }
+
+    private static float CollectStrippable(HashSet<Vector2Int> into)
+    {
+        into.Clear();
+        Player? player = Player.m_localPlayer;
+        if (player == null)
+            return 0f;
+        Vector3 eye = player.transform.position;
+        float zoneSize = 0f;
+        foreach (KeyValuePair<Heightmap, VoxelZone> pair in VoxelWorld.Zones)
+        {
+            Heightmap zh = pair.Key;
+            if (zh == null || pair.Value is not { IsActive: true, HasCarvedGeometry: true })
+                continue;
+            float size = zh.m_width * zh.m_scale;
+            if (size <= 0f)
+                continue;
+            zoneSize = _lastZoneSize = size;
+            Vector3 c = zh.transform.position;
+            float half = size * 0.5f;
+            if (Mathf.Abs(eye.x - c.x) > half + StripRange || Mathf.Abs(eye.z - c.z) > half + StripRange)
+                continue;
+            into.Add(ZoneKey(c.x, c.z, size));
+        }
+
+        return zoneSize;
+    }
+
+    private static void FlushPending()
+    {
+        if (Pending.Count == 0)
+            return;
         foreach (Heightmap lod in Pending)
         {
             if (lod != null)
@@ -86,20 +159,7 @@ public static class DistantLod
         if (lod == null || mesh == null)
             return false;
 
-        ActiveZones.Clear();
-        float zoneSize = 0f;
-        foreach (KeyValuePair<Heightmap, VoxelZone> pair in VoxelWorld.Zones)
-        {
-            Heightmap zh = pair.Key;
-            if (zh == null || pair.Value is not { IsActive: true, HasCarvedGeometry: true })
-                continue;
-            zoneSize = zh.m_width * zh.m_scale;
-            if (zoneSize <= 0f)
-                continue;
-            Vector3 c = zh.transform.position;
-            ActiveZones.Add(ZoneKey(c.x, c.z, zoneSize));
-        }
-
+        float zoneSize = CollectStrippable(ActiveZones);
         if (ActiveZones.Count == 0 || zoneSize <= 0f)
             return false;
 

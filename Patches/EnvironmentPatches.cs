@@ -194,8 +194,8 @@ public static class EnvMan_SetEnv_Patch
 
         if (_held != null)
         {
-            if (!sheltered && ReferenceEquals(__instance.m_currentPSystems, _held))
-                SetMatchedEnabled(_held, true);
+            // shared prefab instances: a missed re-enable mutes that weather globally for the session
+            SetMatchedEnabled(_held, true);
             _held = null;
         }
 

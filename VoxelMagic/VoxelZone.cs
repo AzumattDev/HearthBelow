@@ -89,7 +89,9 @@ public class VoxelZone
     private int _chunksX, _chunksY, _chunksZ;
     private float[] _colMinH = null!, _colMaxH = null!;
     private float[] _heights = null!;
+
     private int _heightsChecksum;
+
     // baked from Hmap.m_renderMesh, so it carries vanilla and mod paint for free
     private Color32[]? _paintColors;
     private readonly List<Color32> _paintColorsScratch = [];
@@ -1147,7 +1149,7 @@ public class VoxelZone
         mesh.SetUVs(0, uvs);
         mesh.SetTriangles(tris, 0);
         if (_needTangents)
-            SetTangents(mesh, uvs);
+            SetTangents(mesh, verts);
         mesh.RecalculateBounds();
         mf.sharedMesh = mesh;
         existing.Collider.sharedMesh = mesh;
@@ -1155,18 +1157,19 @@ public class VoxelZone
             Object.Destroy(old);
     }
 
-    private void SetTangents(Mesh mesh, List<Vector2> uvs)
+    private void SetTangents(Mesh mesh, List<Vector3> verts)
     {
         Vector4[]? src = _vanillaTangents;
         if (src == null)
             return;
         int width = Hmap.m_width;
         int n = width + 1;
+        float half = _zoneSize * 0.5f;
         TangentScratch.Clear();
-        for (int i = 0; i < uvs.Count; ++i)
+        for (int i = 0; i < verts.Count; ++i)
         {
-            float gx = Mathf.Clamp(uvs[i].x * width, 0f, width);
-            float gy = Mathf.Clamp(uvs[i].y * width, 0f, width);
+            float gx = Mathf.Clamp((verts[i].x + half) / _zoneSize * width, 0f, width);
+            float gy = Mathf.Clamp((verts[i].z + half) / _zoneSize * width, 0f, width);
             int x0 = Mathf.Min((int)gx, width - 1);
             int y0 = Mathf.Min((int)gy, width - 1);
             float tx = gx - x0, ty = gy - y0;
